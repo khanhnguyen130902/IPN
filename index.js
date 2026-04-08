@@ -117,7 +117,7 @@ app.post("/zonkhanh", async (req, res) => {
     const body = req.body;
 
     // ✅ log raw chuẩn JSON
-    logJSON("IPN_RAW", { raw: body });
+    // logJSON("IPN_RAW", { raw: body });
 
     // ✅ trả response ngay (QUAN TRỌNG)
     res.status(200).json({ status: "received" });
@@ -191,7 +191,7 @@ app.get("/", (req, res) => {
  */
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
     logJSON("SERVER_START", {
         port: PORT,
         message: "Server started successfully"
