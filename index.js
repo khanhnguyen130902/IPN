@@ -48,11 +48,13 @@ let ipnSTT = 0;
  * 🧾 LOG HELPER (JSON chuẩn 100%)
  */
 function logJSON(type, data) {
+    const frame = "-".repeat(72);
+    console.log(frame);
     console.log(JSON.stringify({
         type,
-        time: new Date().toISOString(),
         ...data
-    }, null, 2)); // 👈 thêm null, 2
+    }, null, 2));
+    console.log(frame);
 }
 
 /**
@@ -115,12 +117,14 @@ function decryptWithKeys(encryptedHex) {
 }
 
 /**
- * ✅ Validate CARD payload theo rule
+ * ✅ Validate payload theo rule CARD/QR
  */
-function validateCardPayload(data) {
+function validateIPNPayload(data) {
     const paymentType = data?.paymentType;
+    const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+    const hasValue = (value) => value !== undefined && value !== null && value !== "";
 
-    if (paymentType !== "CARD") {
+    if (paymentType !== "CARD" && paymentType !== "QR") {
         return {
             applied: false,
             profile: "normal",
@@ -130,86 +134,163 @@ function validateCardPayload(data) {
         };
     }
 
-    const hasCardOrigin = Object.prototype.hasOwnProperty.call(data, "cardOrigin");
-    const isMasterMerchant = hasCardOrigin;
-    const requiredMasterFields = [
-        "requestId",
-        "orderId",
-        "paymentType",
-        "transactionType",
-        "txnId",
-        "serialNo",
-        "posEntryMode",
-        "tid",
-        "mid",
-        "batchNo",
-        "authIdResponse",
-        "retrievalRefNo",
-        "cardNo",
-        "cardType",
-        "bankCode",
-        "invoiceNo",
-        "requestAmount",
-        "tipAmount",
-        "billUrl",
-        "originalTransactionDate",
-        "createdUnixTime",
-        "updatedUnixTime",
-        "isSettle",
-        "settleUnixTime",
-        "isVoid",
-        "voidUnixTime",
-        "isReversal",
-        "reversalUnixTime",
-        "responseCode",
-        "systemTraceNo",
-        "cardOrigin",
-        "extraData",
-        "referenceRefNo"
-    ];
-    const requiredMerchantFields = [
-        "requestId",
-        "orderId",
-        "amount",
-        "tip",
-        "paymentType",
-        "narrative",
-        "fromAccNo",
-        "extraData",
-        "authIdResponse",
-        "retrievalRefNo",
-        "cardNo",
-        "referenceRefNo",
-        "status"
-    ];
-
-    const requiredFields = isMasterMerchant ? requiredMasterFields : requiredMerchantFields;
-    const missingFields = requiredFields.filter((field) => !Object.prototype.hasOwnProperty.call(data, field));
-
     const errors = [];
-    const hasValue = (value) => value !== undefined && value !== null && value !== "";
+    let profile = "normal";
+    let missingFields = [];
 
-    if (!hasValue(data?.orderId)) {
-        errors.push("orderId must have data");
-    }
+    if (paymentType === "CARD") {
+        const isMasterMerchant = hasOwn(data, "cardOrigin");
+        const requiredMasterFields = [
+            "requestId",
+            "orderId",
+            "paymentType",
+            "transactionType",
+            "txnId",
+            "serialNo",
+            "posEntryMode",
+            "tid",
+            "mid",
+            "batchNo",
+            "authIdResponse",
+            "retrievalRefNo",
+            "cardNo",
+            "cardType",
+            "bankCode",
+            "invoiceNo",
+            "requestAmount",
+            "tipAmount",
+            "billUrl",
+            "originalTransactionDate",
+            "createdUnixTime",
+            "updatedUnixTime",
+            "isSettle",
+            "settleUnixTime",
+            "isVoid",
+            "voidUnixTime",
+            "isReversal",
+            "reversalUnixTime",
+            "responseCode",
+            "systemTraceNo",
+            "cardOrigin",
+            "extraData",
+            "referenceRefNo"
+        ];
+        const requiredMerchantFields = [
+            "requestId",
+            "orderId",
+            "amount",
+            "tip",
+            "paymentType",
+            "narrative",
+            "fromAccNo",
+            "extraData",
+            "authIdResponse",
+            "retrievalRefNo",
+            "cardNo",
+            "referenceRefNo",
+            "status"
+        ];
 
-    if (!hasValue(data?.referenceRefNo)) {
-        errors.push("referenceRefNo must have data");
-    } else if (hasValue(data?.orderId)) {
-        if (data.referenceRefNo !== data.orderId) {
+        const requiredFields = isMasterMerchant ? requiredMasterFields : requiredMerchantFields;
+        missingFields = requiredFields.filter((field) => !hasOwn(data, field));
+        profile = isMasterMerchant ? "master-merchant-card" : "merchant-card";
+
+        if (!hasValue(data?.orderId)) {
+            errors.push("orderId must have data");
+        }
+
+        if (!hasValue(data?.referenceRefNo)) {
+            errors.push("referenceRefNo must have data");
+        } else if (hasValue(data?.orderId) && data.referenceRefNo !== data.orderId) {
             errors.push("referenceRefNo must equal orderId");
+        }
+
+        if (hasOwn(data, "extraData")) {
+            if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+                errors.push("extraData must be an object");
+            }
         }
     }
 
-    if (Object.prototype.hasOwnProperty.call(data, "extraData")) {
-        if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
-            errors.push("extraData must be an object");
+    if (paymentType === "QR") {
+        const isMasterMerchantQR = hasOwn(data, "detailTransaction");
+        const requiredMasterQRFields = [
+            "requestId",
+            "orderId",
+            "amount",
+            "tip",
+            "paymentType",
+            "narrative",
+            "fromAccNo",
+            "accNo",
+            "extraData",
+            "detailTransaction"
+        ];
+        const requiredMerchantQRFields = [
+            "requestId",
+            "orderId",
+            "amount",
+            "tip",
+            "paymentType",
+            "narrative",
+            "fromAccNo",
+            "accNo",
+            "trnRefNo",
+            "extraData"
+        ];
+
+        const requiredFields = isMasterMerchantQR ? requiredMasterQRFields : requiredMerchantQRFields;
+        missingFields = requiredFields.filter((field) => !hasOwn(data, field));
+        profile = isMasterMerchantQR ? "master-merchant-qr" : "merchant-qr";
+
+        if (!hasValue(data?.accNo)) {
+            errors.push("accNo must have data");
+        }
+
+        if (hasOwn(data, "extraData")) {
+            if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+                errors.push("extraData must be an object");
+            }
+        }
+
+        if (isMasterMerchantQR) {
+            const detail = data?.detailTransaction;
+            if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+                errors.push("detailTransaction must be an object");
+            } else {
+                const requiredDetailFields = [
+                    "externalRefNo",
+                    "trnRefNo",
+                    "acEntrySrNo",
+                    "accNo",
+                    "source",
+                    "ccy",
+                    "drcr",
+                    "lcyAmount",
+                    "valueDt",
+                    "txnInitDt",
+                    "relatedAccount",
+                    "relatedAccountName",
+                    "narrative",
+                    "clientUserID",
+                    "channel",
+                    "fromAccNo",
+                    "fromAccName",
+                    "fromBankCode",
+                    "fromBankName",
+                    "napasTraceId"
+                ];
+                const missingDetailFields = requiredDetailFields
+                    .filter((field) => !hasOwn(detail, field))
+                    .map((field) => `detailTransaction.${field}`);
+                missingFields = missingFields.concat(missingDetailFields);
+            }
         }
     }
 
     return {
         applied: true,
-        profile: isMasterMerchant ? "master-merchant-card" : "merchant-card",
+        profile,
         valid: missingFields.length === 0 && errors.length === 0,
         missingFields,
         errors
@@ -245,7 +326,6 @@ function buildLogEntry({ body, log, validation }) {
 
     return {
         STT,
-        colorTag: STT % 7,
         duplicateInfo,
         ...log,
         validation,
@@ -271,22 +351,12 @@ function renderLogPage() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>IPN Log Viewer</title>
   <style>
-    :root {
-      --bg: #0b1020;
-      --card: #121a30;
-      --text: #e6ebff;
-      --muted: #9fb0db;
-      --ok: #2dd4bf;
-      --warn: #f59e0b;
-      --err: #ef4444;
-      --dup: #f97316;
-    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       font-family: Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
+      background: #101010;
+      color: #f5f5f5;
       padding: 20px;
     }
     .header {
@@ -298,49 +368,43 @@ function renderLogPage() {
     }
     .title { font-size: 22px; font-weight: 700; }
     .badge {
-      background: #1b2550;
-      color: var(--muted);
+      background: #2a2a2a;
+      color: #d0d0d0;
       padding: 6px 10px;
       border-radius: 999px;
       font-size: 12px;
     }
-    .legend { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+    .legend { font-size: 12px; color: #d0d0d0; margin-bottom: 16px; }
     .logs { display: grid; gap: 12px; }
-    .ipn-separator {
-      height: 4px;
-      border-radius: 999px;
-      opacity: 0.9;
-    }
     .log-card {
-      background: var(--card);
-      border: 1px solid #29345f;
+      background: #1a1a1a;
+      border: 1px solid #3a3a3a;
       border-radius: 12px;
       overflow: hidden;
-      transition: transform 0.15s ease, border-color 0.15s ease;
+      transition: transform 0.15s ease;
     }
     .log-card:hover {
       transform: translateY(-1px);
-      border-color: #4a5fa5;
     }
     .meta {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
       padding: 10px 12px;
-      border-bottom: 1px dashed #2f3b6d;
+      border-bottom: 1px dashed #3a3a3a;
       font-size: 12px;
     }
-    .kv { color: var(--muted); }
+    .kv { color: #d0d0d0; }
     .content {
       padding: 12px;
       display: grid;
       gap: 10px;
     }
-    .block-title { color: #c6d3ff; font-size: 13px; font-weight: 700; }
+    .block-title { color: #f5f5f5; font-size: 13px; font-weight: 700; }
     pre {
       margin: 0;
-      background: #0d152d;
-      border: 1px solid #273766;
+      background: #0f0f0f;
+      border: 1px solid #333333;
       border-radius: 10px;
       padding: 10px;
       overflow: auto;
@@ -352,13 +416,10 @@ function renderLogPage() {
     .key, .string, .number {
       border-radius: 4px;
       padding: 1px 3px;
-      transition: background 0.15s ease, color 0.15s ease;
+      transition: none;
     }
-    .key:hover { background: rgba(100, 116, 255, 0.25); color: #dee4ff; }
-    .field-amount:hover { background: rgba(16, 185, 129, 0.35); color: #d1fae5; }
-    .field-retrieval:hover { background: rgba(245, 158, 11, 0.35); color: #fef3c7; }
-    .warn-list { margin: 0; padding-left: 18px; color: #ffd0d0; font-size: 12px; }
-    .empty { color: var(--muted); font-size: 13px; border: 1px dashed #33406f; border-radius: 10px; padding: 16px; }
+    .warn-list { margin: 0; padding-left: 18px; color: #f5f5f5; font-size: 12px; }
+    .empty { color: #d0d0d0; font-size: 13px; border: 1px dashed #444444; border-radius: 10px; padding: 16px; }
   </style>
 </head>
 <body>
@@ -368,12 +429,11 @@ function renderLogPage() {
     <div class="badge">Realtime</div>
   </div>
   <div class="legend">
-    Hover field <strong>amount</strong> và <strong>retrievalRefNo</strong> để kiểm tra nhanh. Mỗi IPN có separator màu riêng để dễ trace.
+    Giao diện log đã được tối giản để tập trung đọc nội dung trên môi trường production.
   </div>
   <div class="logs" id="logs"></div>
 
   <script>
-    const colorPool = ["#22c55e", "#f59e0b", "#3b82f6", "#ec4899", "#8b5cf6", "#14b8a6", "#f43f5e"];
     const logsRoot = document.getElementById("logs");
     const counter = document.getElementById("counter");
 
@@ -390,11 +450,7 @@ function renderLogPage() {
         /("(?:\\\\u[a-fA-F0-9]{4}|\\\\[^u]|[^\\\\"])*")(\\s*:\\s*)|("(?:\\\\u[a-fA-F0-9]{4}|\\\\[^u]|[^\\\\"])*")|\\b(true|false|null)\\b|-?\\d+(?:\\.\\d+)?(?:[eE][+\\-]?\\d+)?/g,
         (match, keyToken, sep, strToken) => {
           if (keyToken) {
-            const keyName = keyToken.slice(1, -1);
-            let cls = "key";
-            if (keyName === "amount") cls += " field-amount";
-            if (keyName === "retrievalRefNo") cls += " field-retrieval";
-            return '<span class="' + cls + '">' + keyToken + '</span>' + sep;
+            return '<span class="key">' + keyToken + '</span>' + sep;
           }
           if (strToken) return '<span class="string">' + strToken + '</span>';
           return '<span class="number">' + match + '</span>';
@@ -412,10 +468,6 @@ function renderLogPage() {
     }
 
     function renderOne(entry, insertTop = false) {
-      const separator = document.createElement("div");
-      separator.className = "ipn-separator";
-      separator.style.background = colorPool[entry.colorTag % colorPool.length];
-
       const card = document.createElement("div");
       card.className = "log-card";
       card.innerHTML = [
@@ -432,9 +484,7 @@ function renderLogPage() {
 
       if (insertTop && logsRoot.firstChild) {
         logsRoot.insertBefore(card, logsRoot.firstChild);
-        logsRoot.insertBefore(separator, card);
       } else {
-        logsRoot.appendChild(separator);
         logsRoot.appendChild(card);
       }
     }
@@ -511,7 +561,7 @@ app.post("/zonkhanh", async (req, res) => {
             log.decrypted = decrypted;
             log.merchant = result.merchant;
             log.status = "success";
-            const validation = validateCardPayload(decrypted);
+            const validation = validateIPNPayload(decrypted);
             const uiLog = buildLogEntry({ body, log, validation });
             pushLog(uiLog);
             logJSON("IPN_SUCCESS", sanitizeLogForDisplay(uiLog));
@@ -519,7 +569,7 @@ app.post("/zonkhanh", async (req, res) => {
         } catch (err) {
             log.status = "error";
             log.error = err.message;
-            const validation = validateCardPayload(log.decrypted);
+            const validation = validateIPNPayload(log.decrypted);
             const uiLog = buildLogEntry({ body, log, validation });
             pushLog(uiLog);
             logJSON("IPN_ERROR", sanitizeLogForDisplay(uiLog));
