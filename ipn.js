@@ -1,5 +1,5 @@
 const BOT_TOKEN = "8489600440:AAHOFGM-xj9x8bc5GtfK6r2bTdwStI4iqeQ";
-const CHAT_ID = "1260665548";
+const CHAT_ID = "-5269862919";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

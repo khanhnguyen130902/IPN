@@ -330,9 +330,12 @@ function formatTelegramMessage(entry) {
     const statusIcon = isInvalid ? "❌" : "✅";
     const invalidTag = isInvalid ? " [INVALID]" : "";
     const prefix = `${statusIcon} [IPN-LOG]${invalidTag}`;
+    const merchantLine = `✨ Merchant: ${entry?.merchant || "-"}`;
+    const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
+    const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
     const prettyLog = JSON.stringify(entry, null, 2);
 
-    return `${prefix}\n\n${prettyLog}`;
+    return `${prefix}\n${merchantLine}${posLine}\n\n${prettyLog}`;
 }
 
 function buildTelegramErrorLog(entry, errorInfo) {
