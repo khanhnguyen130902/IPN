@@ -43,7 +43,22 @@ const MAX_LOGS = 500;
 const ipnLogs = [];
 const sseClients = new Set();
 const duplicateCounter = new Map();
-let ipnSTT = 0;
+const telegramDedupe = new Map(); // key -> lastSentAtMs (best-effort)
+let ipnSequence = 0;
+
+// =========================
+// ROUTE CONFIG (dễ mở rộng)
+// =========================
+// Muốn thêm route mới + topic mới:
+// - Thêm 1 dòng vào IPN_ROUTES (path + telegramThreadId)
+// - Không cần sửa logic decrypt/validate/log
+const IPN_ROUTES = [
+    { path: "/zonkhanh", telegramThreadId: undefined }, // dùng default topic trong ipn.js
+    { path: "/mie", telegramThreadId: 63 },
+    { path: "/yfe", telegramThreadId: 65 }
+];
+
+const TELEGRAM_DEDUPE_TTL_MS = 15000;
 
 /**
  * 🧾 LOG HELPER (JSON chuẩn 100%)
@@ -333,16 +348,26 @@ function formatTelegramMessage(entry) {
     const merchantLine = `✨ Merchant: ${entry?.merchant || "-"}`;
     const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
     const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
-    const prettyLog = JSON.stringify(entry, null, 2);
+    const telegramPayload = {
+        Sequence: entry?.Sequence ?? null,
+        duplicateInfo: entry?.duplicateInfo ?? null,
+        decrypted: entry?.decrypted ?? null,
+        status: entry?.status ?? null,
+        merchant: entry?.merchant ?? null,
+        attempts: entry?.attempts ?? null,
+        error: entry?.error ?? null,
+        validation: entry?.validation ?? null
+    };
+    const prettyLog = JSON.stringify(telegramPayload, null, 2);
 
     return `${prefix}\n${merchantLine}${posLine}\n\n${prettyLog}`;
 }
 
 function buildTelegramErrorLog(entry, errorInfo) {
-    ipnSTT += 1;
+    ipnSequence += 1;
 
     return {
-        STT: ipnSTT,
+        Sequence: ipnSequence,
         duplicateInfo: "system",
         status: "telegram_error",
         merchant: entry?.merchant || null,
@@ -363,14 +388,82 @@ function buildTelegramErrorLog(entry, errorInfo) {
 }
 
 async function pushLogToTelegram(entry) {
+    // best-effort chống gửi trùng do IPN retry / network timeout
+    const threadId = entry?.__telegramThreadId ?? "default";
+    const fingerprint = entry?.__fingerprint;
+    if (fingerprint) {
+        const key = `${threadId}|${fingerprint}`;
+        const now = Date.now();
+        const last = telegramDedupe.get(key);
+        if (last && now - last < TELEGRAM_DEDUPE_TTL_MS) return;
+        telegramDedupe.set(key, now);
+    }
+
     const message = formatTelegramMessage(entry);
-    const result = await sendTelegram(message, { maxRetries: 3 });
+    const result = await sendTelegram(message, { maxRetries: 3, threadId: entry?.__telegramThreadId });
 
     if (!result.success) {
         const telegramErrorLog = buildTelegramErrorLog(entry, result);
         pushLog(telegramErrorLog);
         logJSON("TELEGRAM_ERROR", sanitizeLogForDisplay(telegramErrorLog));
     }
+}
+
+function createIPNHandler({ routeName, telegramThreadId }) {
+    return (req, res) => {
+        const body = req.body;
+
+        // ✅ trả response ngay (QUAN TRỌNG)
+        res.status(200).json({ status: "received" });
+
+        setImmediate(() => {
+            const log = {
+                decrypted: null,
+                status: "pending",
+                merchant: null,
+                attempts: 0,
+                error: null
+            };
+
+            try {
+                const encryptedHex = body?.data;
+
+                if (!encryptedHex) {
+                    throw new Error("Missing data field");
+                }
+
+                const result = decryptWithKeys(encryptedHex);
+
+                log.attempts = result.attempts;
+
+                if (!result.success) {
+                    throw new Error("All keys failed");
+                }
+
+                const decrypted = result.data;
+
+                log.decrypted = decrypted;
+                log.merchant = result.merchant;
+                log.status = "success";
+                const validation = validateIPNPayload(decrypted);
+                const uiLog = buildLogEntry({ body, log, validation });
+                uiLog.__telegramThreadId = telegramThreadId;
+                uiLog.route = routeName;
+                pushLog(uiLog);
+                logJSON("IPN_SUCCESS", sanitizeLogForDisplay(uiLog));
+
+            } catch (err) {
+                log.status = "error";
+                log.error = err.message;
+                const validation = validateIPNPayload(log.decrypted);
+                const uiLog = buildLogEntry({ body, log, validation });
+                uiLog.__telegramThreadId = telegramThreadId;
+                uiLog.route = routeName;
+                pushLog(uiLog);
+                logJSON("IPN_ERROR", sanitizeLogForDisplay(uiLog));
+            }
+        });
+    };
 }
 
 function getFingerprint(payload) {
@@ -381,20 +474,20 @@ function getFingerprint(payload) {
 }
 
 function buildLogEntry({ body, log, validation }) {
-    ipnSTT += 1;
-    const STT = ipnSTT;
+    ipnSequence += 1;
+    const Sequence = ipnSequence;
     const fingerprint = getFingerprint(log.decrypted || body);
     const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
     duplicateCounter.set(fingerprint, duplicateCount);
     const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
 
     return {
-        // STT,
-        // duplicateInfo,
+        Sequence,
+        duplicateInfo,
         ...log,
         validation,
+        __fingerprint: fingerprint
         // raw: body,
-        // fingerprint
     };
 }
 
@@ -405,6 +498,8 @@ function sanitizeLogForDisplay(logEntry) {
     delete output.error;
     delete output.status;
     delete output.__skipTelegram;
+    delete output.__telegramThreadId;
+    delete output.__fingerprint;
     return output;
 }
 
@@ -537,7 +632,7 @@ function renderLogPage() {
       card.className = "log-card";
       card.innerHTML = [
         '<div class="meta">',
-          '<span class="kv">#' + esc(entry.STT) + '</span>',
+          '<span class="kv">#' + esc(entry.Sequence) + '</span>',
           '<span class="kv">merchant: ' + esc(entry.merchant || "-") + '</span>',
           '<span class="kv">duplicate: ' + esc(entry.duplicateInfo || "first_time") + '</span>',
         '</div>',
@@ -585,61 +680,10 @@ function renderLogPage() {
 }
 
 /**
- * 📩 IPN ENDPOINT
+ * 📩 IPN ENDPOINTS
  */
-app.post("/zonkhanh", async (req, res) => {
-    const body = req.body;
-
-    // ✅ log raw chuẩn JSON
-    // logJSON("IPN_RAW", { raw: body });
-
-    // ✅ trả response ngay (QUAN TRỌNG)
-    res.status(200).json({ status: "received" });
-
-    // 👉 xử lý async phía sau
-    setImmediate(() => {
-        const log = {
-            decrypted: null,
-            status: "pending",
-            merchant: null,
-            attempts: 0,
-            error: null
-        };
-
-        try {
-            const encryptedHex = body?.data;
-
-            if (!encryptedHex) {
-                throw new Error("Missing data field");
-            }
-
-            const result = decryptWithKeys(encryptedHex);
-
-            log.attempts = result.attempts;
-
-            if (!result.success) {
-                throw new Error("All keys failed");
-            }
-
-            const decrypted = result.data;
-
-            log.decrypted = decrypted;
-            log.merchant = result.merchant;
-            log.status = "success";
-            const validation = validateIPNPayload(decrypted);
-            const uiLog = buildLogEntry({ body, log, validation });
-            pushLog(uiLog);
-            logJSON("IPN_SUCCESS", sanitizeLogForDisplay(uiLog));
-
-        } catch (err) {
-            log.status = "error";
-            log.error = err.message;
-            const validation = validateIPNPayload(log.decrypted);
-            const uiLog = buildLogEntry({ body, log, validation });
-            pushLog(uiLog);
-            logJSON("IPN_ERROR", sanitizeLogForDisplay(uiLog));
-        }
-    });
+IPN_ROUTES.forEach((cfg) => {
+    app.post(cfg.path, createIPNHandler({ routeName: cfg.path, telegramThreadId: cfg.telegramThreadId }));
 });
 
 /**
