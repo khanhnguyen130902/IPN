@@ -1,9 +1,10 @@
 const express = require("express");
 const crypto = require("crypto");
+const { sendTelegram } = require("./ipn");
 
 const app = express();
 app.use(express.json());
-
+const owner = "zonkhanh";
 /**
  * 🔐 DANH SÁCH KEY (MAX 5)
  *
@@ -307,6 +308,66 @@ function pushLog(entry) {
     sseClients.forEach((res) => {
         res.write(eventData);
     });
+
+    if (!entry.__skipTelegram) {
+        void pushLogToTelegram(entry);
+    }
+}
+
+function getTelegramValidationState(entry) {
+    const profile = entry?.validation?.profile;
+    const isCardProfile = profile === "master-merchant-card" || profile === "merchant-card";
+    const isInvalid = isCardProfile && entry?.validation?.applied && !entry?.validation?.valid;
+
+    return {
+        isCardProfile,
+        isInvalid
+    };
+}
+
+function formatTelegramMessage(entry) {
+    const { isInvalid } = getTelegramValidationState(entry);
+    const statusIcon = isInvalid ? "❌" : "✅";
+    const invalidTag = isInvalid ? " [INVALID]" : "";
+    const prefix = `${statusIcon} [IPN-LOG]${invalidTag}`;
+    const prettyLog = JSON.stringify(entry, null, 2);
+
+    return `${prefix}\n\n${prettyLog}`;
+}
+
+function buildTelegramErrorLog(entry, errorInfo) {
+    ipnSTT += 1;
+
+    return {
+        STT: ipnSTT,
+        duplicateInfo: "system",
+        status: "telegram_error",
+        merchant: entry?.merchant || null,
+        decrypted: entry?.decrypted || null,
+        validation: entry?.validation || {
+            applied: false,
+            profile: "normal",
+            valid: true,
+            missingFields: [],
+            errors: []
+        },
+        telegram: {
+            error: errorInfo?.error?.message || "Unknown telegram error",
+            attempt: errorInfo?.attempt || 0
+        },
+        __skipTelegram: true
+    };
+}
+
+async function pushLogToTelegram(entry) {
+    const message = formatTelegramMessage(entry);
+    const result = await sendTelegram(message, { maxRetries: 3 });
+
+    if (!result.success) {
+        const telegramErrorLog = buildTelegramErrorLog(entry, result);
+        pushLog(telegramErrorLog);
+        logJSON("TELEGRAM_ERROR", sanitizeLogForDisplay(telegramErrorLog));
+    }
 }
 
 function getFingerprint(payload) {
@@ -325,8 +386,8 @@ function buildLogEntry({ body, log, validation }) {
     const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
 
     return {
-        STT,
-        duplicateInfo,
+        // STT,
+        // duplicateInfo,
         ...log,
         validation,
         // raw: body,
@@ -340,6 +401,7 @@ function sanitizeLogForDisplay(logEntry) {
     delete output.attempts;
     delete output.error;
     delete output.status;
+    delete output.__skipTelegram;
     return output;
 }
 
@@ -616,6 +678,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
     logJSON("SERVER_START", {
         port: PORT,
-        message: "Server started successfully"
+        message: "Server started successfully",
+        telegram: "https://t.me/zonkhanh",
+        owner: "zonkhanh"
     });
-});
+    }); 
