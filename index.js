@@ -21,20 +21,20 @@ const AES_KEY_LIST = [
         key: "616c1b1a28401f20692f27c34f1eb2609d6993c90a440e37744202e6bfaefce4"
     },
     {
-        name: "MERCHANT_B",
-        key: process.env.KEY_2
+        name: "Tabby VA",
+        key: "8b2392c1d6a66cde222ce9946d795134a84c6a22831f7d27f35af6e119504df9"
     },
     {
-        name: "MERCHANT_C",
-        key: process.env.KEY_3
+        name: "Fast Food KDC Kim Sơn",
+        key: "049c05ad3f58adaa6def59cf7976656c00a7c5c4a63ba246432bcb3380cc9911"
     },
     {
-        name: "MERCHANT_D",
-        key: process.env.KEY_4
+        name: "Apple Store Hà Nội",
+        key: "c30e2793d2e3f8e22be9f77cb84d4c0753159767f3d63f52944f69f2bdcedf8b"
     },
     {
-        name: "MERCHANT_E",
-        key: process.env.KEY_5
+        name: "Bánh kẹo 2",
+        key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161"
     }
 ].filter(item => item.key); // loại key null
 
