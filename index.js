@@ -16,30 +16,30 @@ const owner = "zonkhanh";
  * "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
  */
 const AES_KEY_LIST = [
-    {
-        name: "Dunk SG",
-        key: "616c1b1a28401f20692f27c34f1eb2609d6993c90a440e37744202e6bfaefce4"
-    },
-    {
-        name: "Tabby VA",
-        key: "8b2392c1d6a66cde222ce9946d795134a84c6a22831f7d27f35af6e119504df9"
-    },
-    {
-        name: "Fast Food KDC Kim Sơn",
-        key: "049c05ad3f58adaa6def59cf7976656c00a7c5c4a63ba246432bcb3380cc9911"
-    },
-    {
-        name: "Apple Store Hà Nội",
-        key: "c30e2793d2e3f8e22be9f77cb84d4c0753159767f3d63f52944f69f2bdcedf8b"
-    },
-    {
-        name: "Bánh kẹo 2",
-        key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161"
-    },
-    {
-        name: "Chè xôi bà Sáu",
-        key: "7114514da32bc2c1c9956c508f608730464ab67b66ae66c649dbc6629f9bd035"
-    }
+  {
+    name: "Dunk SG",
+    key: "616c1b1a28401f20692f27c34f1eb2609d6993c90a440e37744202e6bfaefce4"
+  },
+  {
+    name: "Tabby VA",
+    key: "8b2392c1d6a66cde222ce9946d795134a84c6a22831f7d27f35af6e119504df9"
+  },
+  {
+    name: "Fast Food KDC Kim Sơn",
+    key: "049c05ad3f58adaa6def59cf7976656c00a7c5c4a63ba246432bcb3380cc9911"
+  },
+  {
+    name: "Apple Store Hà Nội",
+    key: "c30e2793d2e3f8e22be9f77cb84d4c0753159767f3d63f52944f69f2bdcedf8b"
+  },
+  {
+    name: "Bánh kẹo 2",
+    key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161"
+  },
+  {
+    name: "Chè xôi bà Sáu",
+    key: "7114514da32bc2c1c9956c508f608730464ab67b66ae66c649dbc6629f9bd035"
+  }
 ].filter(item => item.key); // loại key null
 
 // 🧠 in-memory store để hiển thị UI log
@@ -57,496 +57,513 @@ let ipnSequence = 0;
 // - Thêm 1 dòng vào IPN_ROUTES (path + telegramThreadId)
 // - Không cần sửa logic decrypt/validate/log
 const IPN_ROUTES = [
-    { path: "/zonkhanh", telegramThreadId: undefined }, // dùng default topic trong ipn.js
-    { path: "/mie", telegramThreadId: 63 },
-    { path: "/yfe", telegramThreadId: 65 }
+  { path: "/zonkhanh", telegramThreadId: undefined }, // dùng default topic trong ipn.js
+  { path: "/mie", telegramThreadId: 63 },
+  { path: "/yfe", telegramThreadId: 65 }
 ];
 
-const TELEGRAM_DEDUPE_TTL_MS = 15000;
+const TELEGRAM_DEDUPE_TTL_MS = 0;
 
 /**
  * 🧾 LOG HELPER (JSON chuẩn 100%)
  */
 function logJSON(type, data) {
-    const frame = "-".repeat(72);
-    console.log(frame);
-    console.log(JSON.stringify({
-        type,
-        ...data
-    }, null, 2));
-    console.log(frame);
+  const frame = "-".repeat(72);
+  console.log(frame);
+  console.log(JSON.stringify({
+    type,
+    ...data
+  }, null, 2));
+  console.log(frame);
+}
+
+function logIPN(type, entry) {
+  const frame = "-".repeat(72);
+  console.log(frame);
+  console.log(`[${type}]`);
+  console.log(formatTelegramMessage(entry));
+  console.log(frame);
 }
 
 /**
  * 🔓 AES-256-CBC decrypt
  */
 function decryptAES(encryptedHex, keyHex) {
-    const key = Buffer.from(keyHex, "hex");
+  const key = Buffer.from(keyHex, "hex");
 
-    const ivHex = encryptedHex.substring(0, 32);
-    const dataHex = encryptedHex.substring(32);
+  const ivHex = encryptedHex.substring(0, 32);
+  const dataHex = encryptedHex.substring(32);
 
-    const iv = Buffer.from(ivHex, "hex");
-    const encrypted = Buffer.from(dataHex, "hex");
+  const iv = Buffer.from(ivHex, "hex");
+  const encrypted = Buffer.from(dataHex, "hex");
 
-    const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
+  const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
 
-    let decrypted = decipher.update(encrypted);
-    decrypted = Buffer.concat([decrypted, decipher.final()]);
+  let decrypted = decipher.update(encrypted);
+  decrypted = Buffer.concat([decrypted, decipher.final()]);
 
-    return JSON.parse(decrypted.toString("utf8"));
+  return JSON.parse(decrypted.toString("utf8"));
 }
 
 /**
  * ✅ Validate payload
  */
 function isValidPayload(data) {
-    return (
-        data &&
-        typeof data === "object" &&
-        (data.txnId || data.orderId || data.amount)
-    );
+  return (
+    data &&
+    typeof data === "object" &&
+    (data.txnId || data.orderId || data.amount)
+  );
 }
 
 /**
  * 🔁 Multi-key decrypt
  */
 function decryptWithKeys(encryptedHex) {
-    let attempts = 0;
+  let attempts = 0;
 
-    for (const item of AES_KEY_LIST) {
-        attempts++;
+  for (const item of AES_KEY_LIST) {
+    attempts++;
 
-        try {
-            const data = decryptAES(encryptedHex, item.key);
+    try {
+      const data = decryptAES(encryptedHex, item.key);
 
-            if (isValidPayload(data)) {
-                return {
-                    success: true,
-                    data,
-                    merchant: item.name,
-                    attempts
-                };
-            }
-        } catch (err) {
-            // bỏ qua key lỗi
-        }
+      if (isValidPayload(data)) {
+        return {
+          success: true,
+          data,
+          merchant: item.name,
+          attempts
+        };
+      }
+    } catch (err) {
+      // bỏ qua key lỗi
     }
+  }
 
-    return { success: false, attempts };
+  return { success: false, attempts };
 }
 
 /**
  * ✅ Validate payload theo rule CARD/QR
  */
 function validateIPNPayload(data) {
-    const paymentType = data?.paymentType;
-    const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-    const hasValue = (value) => value !== undefined && value !== null && value !== "";
+  const paymentType = data?.paymentType;
+  const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+  const hasValue = (value) => value !== undefined && value !== null && value !== "";
 
-    if (paymentType !== "CARD" && paymentType !== "QR") {
-        return {
-            applied: false,
-            profile: "normal",
-            valid: true,
-            missingFields: [],
-            errors: []
-        };
-    }
-
-    const errors = [];
-    let profile = "normal";
-    let missingFields = [];
-
-    if (paymentType === "CARD") {
-        const isMasterMerchant = hasOwn(data, "cardOrigin");
-        const requiredMasterFields = [
-            "requestId",
-            "orderId",
-            "paymentType",
-            "transactionType",
-            "txnId",
-            "serialNo",
-            "posEntryMode",
-            "tid",
-            "mid",
-            "batchNo",
-            "authIdResponse",
-            "retrievalRefNo",
-            "cardNo",
-            "cardType",
-            "bankCode",
-            "invoiceNo",
-            "requestAmount",
-            "tipAmount",
-            "billUrl",
-            "originalTransactionDate",
-            "createdUnixTime",
-            "updatedUnixTime",
-            "isSettle",
-            "settleUnixTime",
-            "isVoid",
-            "voidUnixTime",
-            "isReversal",
-            "reversalUnixTime",
-            "responseCode",
-            "systemTraceNo",
-            "cardOrigin",
-            "extraData",
-            "referenceRefNo"
-        ];
-        const requiredMerchantFields = [
-            "requestId",
-            "orderId",
-            "amount",
-            "tip",
-            "paymentType",
-            "narrative",
-            "fromAccNo",
-            "extraData",
-            "authIdResponse",
-            "retrievalRefNo",
-            "cardNo",
-            "referenceRefNo",
-            "status"
-        ];
-
-        const requiredFields = isMasterMerchant ? requiredMasterFields : requiredMerchantFields;
-        missingFields = requiredFields.filter((field) => !hasOwn(data, field));
-        profile = isMasterMerchant ? "master-merchant-card" : "merchant-card";
-
-        if (!hasValue(data?.orderId)) {
-            errors.push("orderId must have data");
-        }
-
-        if (!hasValue(data?.referenceRefNo)) {
-            errors.push("referenceRefNo must have data");
-        } else if (hasValue(data?.orderId) && data.referenceRefNo !== data.orderId) {
-            errors.push("referenceRefNo must equal orderId");
-        }
-
-        if (hasOwn(data, "extraData")) {
-            if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
-                errors.push("extraData must be an object");
-            }
-        }
-    }
-
-    if (paymentType === "QR") {
-        const isMasterMerchantQR = hasOwn(data, "detailTransaction");
-        const requiredMasterQRFields = [
-            "requestId",
-            "orderId",
-            "amount",
-            "tip",
-            "paymentType",
-            "narrative",
-            "fromAccNo",
-            "accNo",
-            "extraData",
-            "detailTransaction"
-        ];
-        const requiredMerchantQRFields = [
-            "requestId",
-            "orderId",
-            "amount",
-            "tip",
-            "paymentType",
-            "narrative",
-            "fromAccNo",
-            "accNo",
-            "trnRefNo",
-            "extraData"
-        ];
-
-        const requiredFields = isMasterMerchantQR ? requiredMasterQRFields : requiredMerchantQRFields;
-        missingFields = requiredFields.filter((field) => !hasOwn(data, field));
-        profile = isMasterMerchantQR ? "master-merchant-qr" : "merchant-qr";
-
-        if (!hasValue(data?.accNo)) {
-            errors.push("accNo must have data");
-        }
-
-        if (hasOwn(data, "extraData")) {
-            if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
-                errors.push("extraData must be an object");
-            }
-        }
-
-        if (isMasterMerchantQR) {
-            const detail = data?.detailTransaction;
-            if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
-                errors.push("detailTransaction must be an object");
-            } else {
-                const requiredDetailFields = [
-                    "externalRefNo",
-                    "trnRefNo",
-                    "acEntrySrNo",
-                    "accNo",
-                    "source",
-                    "ccy",
-                    "drcr",
-                    "lcyAmount",
-                    "valueDt",
-                    "txnInitDt",
-                    "relatedAccount",
-                    "relatedAccountName",
-                    "narrative",
-                    "clientUserID",
-                    "channel",
-                    "fromAccNo",
-                    "fromAccName",
-                    "fromBankCode",
-                    "fromBankName",
-                    "napasTraceId"
-                ];
-                const missingDetailFields = requiredDetailFields
-                    .filter((field) => !hasOwn(detail, field))
-                    .map((field) => `detailTransaction.${field}`);
-                missingFields = missingFields.concat(missingDetailFields);
-            }
-        }
-    }
-
+  if (paymentType !== "CARD" && paymentType !== "QR") {
     return {
-        applied: true,
-        profile,
-        valid: missingFields.length === 0 && errors.length === 0,
-        missingFields,
-        errors
+      applied: false,
+      profile: "normal",
+      valid: true,
+      missingFields: [],
+      errors: []
     };
+  }
+
+  const errors = [];
+  let profile = "normal";
+  let missingFields = [];
+
+  if (paymentType === "CARD") {
+    const isMasterMerchant = hasOwn(data, "cardOrigin");
+    const requiredMasterFields = [
+      "requestId",
+      "orderId",
+      "paymentType",
+      "transactionType",
+      "txnId",
+      "serialNo",
+      "posEntryMode",
+      "tid",
+      "mid",
+      "batchNo",
+      "authIdResponse",
+      "retrievalRefNo",
+      "cardNo",
+      "cardType",
+      "bankCode",
+      "invoiceNo",
+      "requestAmount",
+      "tipAmount",
+      "billUrl",
+      "originalTransactionDate",
+      "createdUnixTime",
+      "updatedUnixTime",
+      "isSettle",
+      "settleUnixTime",
+      "isVoid",
+      "voidUnixTime",
+      "isReversal",
+      "reversalUnixTime",
+      "responseCode",
+      "systemTraceNo",
+      "cardOrigin",
+      "extraData",
+      "referenceRefNo"
+    ];
+    const requiredMerchantFields = [
+      "requestId",
+      "orderId",
+      "amount",
+      "tip",
+      "paymentType",
+      "narrative",
+      "fromAccNo",
+      "extraData",
+      "authIdResponse",
+      "retrievalRefNo",
+      "cardNo",
+      "referenceRefNo",
+      "status"
+    ];
+
+    const requiredFields = isMasterMerchant ? requiredMasterFields : requiredMerchantFields;
+    missingFields = requiredFields.filter((field) => !hasOwn(data, field));
+    profile = isMasterMerchant ? "master-merchant-card" : "merchant-card";
+
+    if (!hasValue(data?.orderId)) {
+      errors.push("orderId must have data");
+    }
+
+    if (!hasValue(data?.referenceRefNo)) {
+      errors.push("referenceRefNo must have data");
+    } else if (hasValue(data?.orderId) && data.referenceRefNo !== data.orderId) {
+      errors.push("referenceRefNo must equal orderId");
+    }
+
+    if (hasOwn(data, "extraData")) {
+      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+        errors.push("extraData must be an object");
+      }
+    }
+  }
+
+  if (paymentType === "QR") {
+    const isMasterMerchantQR = hasOwn(data, "detailTransaction");
+    const requiredMasterQRFields = [
+      "requestId",
+      "orderId",
+      "amount",
+      "tip",
+      "paymentType",
+      "narrative",
+      "fromAccNo",
+      "accNo",
+      "extraData",
+      "detailTransaction"
+    ];
+    const requiredMerchantQRFields = [
+      "requestId",
+      "orderId",
+      "amount",
+      "tip",
+      "paymentType",
+      "narrative",
+      "fromAccNo",
+      "accNo",
+      "trnRefNo",
+      "extraData"
+    ];
+
+    const requiredFields = isMasterMerchantQR ? requiredMasterQRFields : requiredMerchantQRFields;
+    missingFields = requiredFields.filter((field) => !hasOwn(data, field));
+    profile = isMasterMerchantQR ? "master-merchant-qr" : "merchant-qr";
+
+    if (!hasValue(data?.accNo)) {
+      errors.push("accNo must have data");
+    }
+
+    if (hasOwn(data, "extraData")) {
+      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+        errors.push("extraData must be an object");
+      }
+    }
+
+    if (isMasterMerchantQR) {
+      const detail = data?.detailTransaction;
+      if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
+        errors.push("detailTransaction must be an object");
+      } else {
+        const requiredDetailFields = [
+          "externalRefNo",
+          "trnRefNo",
+          "acEntrySrNo",
+          "accNo",
+          "source",
+          "ccy",
+          "drcr",
+          "lcyAmount",
+          "valueDt",
+          "txnInitDt",
+          "relatedAccount",
+          "relatedAccountName",
+          "narrative",
+          "clientUserID",
+          "channel",
+          "fromAccNo",
+          "fromAccName",
+          "fromBankCode",
+          "fromBankName",
+          "napasTraceId"
+        ];
+        const missingDetailFields = requiredDetailFields
+          .filter((field) => !hasOwn(detail, field))
+          .map((field) => `detailTransaction.${field}`);
+        missingFields = missingFields.concat(missingDetailFields);
+      }
+    }
+  }
+
+  return {
+    applied: true,
+    profile,
+    valid: missingFields.length === 0 && errors.length === 0,
+    missingFields,
+    errors
+  };
 }
 
 function pushLog(entry) {
-    ipnLogs.push(entry);
-    if (ipnLogs.length > MAX_LOGS) {
-        ipnLogs.shift();
-    }
+  ipnLogs.push(entry);
+  if (ipnLogs.length > MAX_LOGS) {
+    ipnLogs.shift();
+  }
 
-    const eventData = `data: ${JSON.stringify(entry)}\n\n`;
-    sseClients.forEach((res) => {
-        res.write(eventData);
-    });
+  const eventData = `data: ${JSON.stringify(entry)}\n\n`;
+  sseClients.forEach((res) => {
+    res.write(eventData);
+  });
 
-    if (!entry.__skipTelegram) {
-        void pushLogToTelegram(entry);
-    }
+  if (!entry.__skipTelegram) {
+    void pushLogToTelegram(entry);
+  }
 }
 
 function getTelegramValidationState(entry) {
-    const profile = entry?.validation?.profile;
-    const isCardProfile = profile === "master-merchant-card" || profile === "merchant-card";
-    const isInvalid = isCardProfile && entry?.validation?.applied && !entry?.validation?.valid;
+  const profile = entry?.validation?.profile;
+  const isCardProfile = profile === "master-merchant-card" || profile === "merchant-card";
+  const isInvalid = isCardProfile && entry?.validation?.applied && !entry?.validation?.valid;
 
-    return {
-        isCardProfile,
-        isInvalid
-    };
+  return {
+    isCardProfile,
+    isInvalid
+  };
 }
 
+//Data hiện ở log telegram
 function formatTelegramMessage(entry) {
-    if (entry?.decryptFailed) {
-        const prefix = "⚠️ [IPN-LOG] Decrypt failed";
-        const routeLine = `🛤 Route: ${entry?.route || "-"}`;
-        const raw = entry?.rawData != null ? String(entry.rawData) : "";
-        return `${prefix}\n${routeLine}\n\nraw data:\n${raw}`;
+  if (entry?.decryptFailed) {
+    const prefix = "⚠️ [IPN-LOG] Decrypt failed";
+    const routeLine = `🛤 Route: ${entry?.route || "-"}`;
+    const raw = entry?.rawData != null ? String(entry.rawData) : "";
+    return `${prefix}\n${routeLine}\n\nraw data:\n${raw}`;
+  }
+
+  const { isInvalid } = getTelegramValidationState(entry);
+  const statusIcon = isInvalid ? "❌" : "✅";
+  const invalidTag = isInvalid ? " [INVALID]" : "";
+  const prefix = `${statusIcon} [IPN-LOG]${invalidTag}`;
+  const merchantLine = `🐳 Merchant: ${entry?.merchant || "-"}`;
+  const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
+  const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
+
+  // Validation block
+  const validation = entry?.validation;
+  let validationLine = "";
+  if (validation?.applied) {
+    const validStatus = validation.valid ? "PASS" : "FAIL";
+    validationLine = `\n📋 Validation [${validation.profile}]: ${validStatus}`;
+    if (!validation.valid) {
+      const bulletPoints = [
+        ...(validation.missingFields || []).map(f => `  • Missing: ${f}`),
+        ...(validation.errors || []).map(e => `  • ${e}`)
+      ].join("\n");
+      if (bulletPoints) validationLine += `\n${bulletPoints}`;
     }
+  }
 
-    const { isInvalid } = getTelegramValidationState(entry);
-    const statusIcon = isInvalid ? "❌" : "✅";
-    const invalidTag = isInvalid ? " [INVALID]" : "";
-    const prefix = `${statusIcon} [IPN-LOG]${invalidTag}`;
-    const merchantLine = `🐳 Merchant: ${entry?.merchant || "-"}`;
-    const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
-    const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
-    const telegramPayload = {
-        Sequence: entry?.Sequence ?? null,
-        duplicateInfo: entry?.duplicateInfo ?? null,
-        decrypted: entry?.decrypted ?? null,
-        status: entry?.status ?? null,
-        merchant: entry?.merchant ?? null,
-        attempts: entry?.attempts ?? null,
-        error: entry?.error ?? null,
-        validation: entry?.validation ?? null
-    };
-    const prettyLog = JSON.stringify(telegramPayload, null, 2);
+  // In thẳng decrypted, không wrap
+  const prettyLog = JSON.stringify(entry?.decrypted ?? null, null, 2);
 
-    return `${prefix}\n${merchantLine}${posLine}\n\n${prettyLog}`;
+  return `${prefix}\n${merchantLine}${posLine}${validationLine}\n\nDecrypted:\n${prettyLog}`;
 }
 
 function buildTelegramErrorLog(entry, errorInfo) {
-    ipnSequence += 1;
+  ipnSequence += 1;
 
-    return {
-        Sequence: ipnSequence,
-        duplicateInfo: "system",
-        status: "telegram_error",
-        merchant: entry?.merchant || null,
-        decrypted: entry?.decrypted || null,
-        validation: entry?.validation || {
-            applied: false,
-            profile: "normal",
-            valid: true,
-            missingFields: [],
-            errors: []
-        },
-        telegram: {
-            error: errorInfo?.error?.message || "Unknown telegram error",
-            attempt: errorInfo?.attempt || 0
-        },
-        __skipTelegram: true
-    };
+  return {
+    Sequence: ipnSequence,
+    duplicateInfo: "system",
+    status: "telegram_error",
+    merchant: entry?.merchant || null,
+    decrypted: entry?.decrypted || null,
+    validation: entry?.validation || {
+      applied: false,
+      profile: "normal",
+      valid: true,
+      missingFields: [],
+      errors: []
+    },
+    telegram: {
+      error: errorInfo?.error?.message || "Unknown telegram error",
+      attempt: errorInfo?.attempt || 0
+    },
+    __skipTelegram: true
+  };
 }
 
 async function pushLogToTelegram(entry) {
-    // best-effort chống gửi trùng do IPN retry / network timeout
-    const threadId = entry?.__telegramThreadId ?? "default";
-    const fingerprint = entry?.__fingerprint;
-    if (fingerprint) {
-        const key = `${threadId}|${fingerprint}`;
-        const now = Date.now();
-        const last = telegramDedupe.get(key);
-        if (last && now - last < TELEGRAM_DEDUPE_TTL_MS) return;
-        telegramDedupe.set(key, now);
-    }
+  // best-effort chống gửi trùng do IPN retry / network timeout
+  const threadId = entry?.__telegramThreadId ?? "default";
+  const fingerprint = entry?.__fingerprint;
+  if (fingerprint) {
+    const key = `${threadId}|${fingerprint}`;
+    const now = Date.now();
+    const last = telegramDedupe.get(key);
+    if (last && now - last < TELEGRAM_DEDUPE_TTL_MS) return;
+    telegramDedupe.set(key, now);
+  }
 
-    const message = formatTelegramMessage(entry);
-    const result = await sendTelegram(message, { maxRetries: 3, threadId: entry?.__telegramThreadId });
+  const message = formatTelegramMessage(entry);
+  const result = await sendTelegram(message, { maxRetries: 3, threadId: entry?.__telegramThreadId });
 
-    if (!result.success) {
-        const telegramErrorLog = buildTelegramErrorLog(entry, result);
-        pushLog(telegramErrorLog);
-        logJSON("TELEGRAM_ERROR", sanitizeLogForDisplay(telegramErrorLog));
-    }
+  if (!result.success) {
+    const telegramErrorLog = buildTelegramErrorLog(entry, result);
+    pushLog(telegramErrorLog);
+    logJSON("TELEGRAM_ERROR", sanitizeLogForDisplay(telegramErrorLog));
+  }
 }
 
 function createIPNHandler({ routeName, telegramThreadId }) {
-    return (req, res) => {
-        const body = req.body;
+  return (req, res) => {
+    const body = req.body;
 
-        // ✅ trả response ngay (QUAN TRỌNG)
-        res.status(200).json({ status: "received" });
+    // ✅ trả response ngay (QUAN TRỌNG)
+    res.status(200).json({ status: "received" });
 
-        setImmediate(() => {
-            const log = {
-                decrypted: null,
-                status: "pending",
-                merchant: null,
-                attempts: 0,
-                error: null
-            };
+    setImmediate(() => {
+      const log = {
+        decrypted: null,
+        status: "pending",
+        merchant: null,
+        attempts: 0,
+        error: null
+      };
 
-            try {
-                const encryptedHex = body?.data;
+      try {
+        const encryptedHex = body?.data;
 
-                if (!encryptedHex) {
-                    throw new Error("Missing data field");
-                }
+        if (!encryptedHex) {
+          throw new Error("Missing data field");
+        }
 
-                const result = decryptWithKeys(encryptedHex);
+        const result = decryptWithKeys(encryptedHex);
 
-                log.attempts = result.attempts;
+        log.attempts = result.attempts;
 
-                if (!result.success) {
-                    throw new Error("All keys failed");
-                }
+        if (!result.success) {
+          throw new Error("All keys failed");
+        }
 
-                const decrypted = result.data;
+        const decrypted = result.data;
 
-                log.decrypted = decrypted;
-                log.merchant = result.merchant;
-                log.status = "success";
-                const validation = validateIPNPayload(decrypted);
-                const uiLog = buildLogEntry({ body, log, validation });
-                uiLog.__telegramThreadId = telegramThreadId;
-                uiLog.route = routeName;
-                pushLog(uiLog);
-                logJSON("IPN_SUCCESS", sanitizeLogForDisplay(uiLog));
+        log.decrypted = decrypted;
+        log.merchant = result.merchant;
+        log.status = "success";
+        const validation = validateIPNPayload(decrypted);
+        const uiLog = buildLogEntry({ body, log, validation });
+        uiLog.__telegramThreadId = telegramThreadId;
+        uiLog.route = routeName;
+        pushLog(uiLog);
+        logIPN("IPN_SUCCESS", uiLog);
 
-            } catch (err) {
-                if (err.message === "All keys failed") {
-                    const uiLog = buildDecryptFailedLogEntry({ body, routeName, telegramThreadId });
-                    pushLog(uiLog);
-                    logJSON("IPN_ERROR", {
-                        route: routeName,
-                        error: err.message,
-                        rawData: body?.data !== undefined && body?.data !== null ? body.data : body
-                    });
-                } else {
-                    log.status = "error";
-                    log.error = err.message;
-                    const validation = validateIPNPayload(log.decrypted);
-                    const uiLog = buildLogEntry({ body, log, validation });
-                    uiLog.__telegramThreadId = telegramThreadId;
-                    uiLog.route = routeName;
-                    pushLog(uiLog);
-                    logJSON("IPN_ERROR", sanitizeLogForDisplay(uiLog));
-                }
-            }
-        });
-    };
+      } catch (err) {
+        if (err.message === "All keys failed") {
+          const uiLog = buildDecryptFailedLogEntry({ body, routeName, telegramThreadId });
+          pushLog(uiLog);
+          logJSON("IPN_ERROR", {
+            route: routeName,
+            error: err.message,
+            rawData: body?.data !== undefined && body?.data !== null ? body.data : body
+          });
+        } else {
+          log.status = "error";
+          log.error = err.message;
+          const validation = validateIPNPayload(log.decrypted);
+          const uiLog = buildLogEntry({ body, log, validation });
+          uiLog.__telegramThreadId = telegramThreadId;
+          uiLog.route = routeName;
+          pushLog(uiLog);
+          logIPN("IPN_ERROR", uiLog);
+        }
+      }
+    });
+  };
 }
 
 function getFingerprint(payload) {
-    return crypto
-        .createHash("sha256")
-        .update(JSON.stringify(payload || {}))
-        .digest("hex");
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(payload || {}))
+    .digest("hex");
 }
 
+// Data hiện ở log render
 function buildLogEntry({ body, log, validation }) {
-    ipnSequence += 1;
-    const Sequence = ipnSequence;
-    const fingerprint = getFingerprint(log.decrypted || body);
-    const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
-    duplicateCounter.set(fingerprint, duplicateCount);
-    const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
+  ipnSequence += 1;
+  const Sequence = ipnSequence;
+  const fingerprint = getFingerprint(log.decrypted || body);
+  const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
+  duplicateCounter.set(fingerprint, duplicateCount);
+  const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
 
-    return {
-        Sequence,
-        duplicateInfo,
-        ...log,
-        validation,
-        __fingerprint: fingerprint
-        // raw: body,
-    };
+  return {
+    // Sequence,
+    // duplicateInfo,
+    ...log,
+    validation,
+    __fingerprint: fingerprint
+    // raw: body,
+  };
 }
 
 /**
  * Log tối giản khi không decrypt được: chỉ raw `data` + route, không Sequence/validation/...
  */
 function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
-    ipnSequence += 1;
-    const rawData =
-        body?.data !== undefined && body?.data !== null ? String(body.data) : JSON.stringify(body ?? {});
-    const fingerprint = getFingerprint({ raw: rawData });
+  ipnSequence += 1;
+  const rawData =
+    body?.data !== undefined && body?.data !== null ? String(body.data) : JSON.stringify(body ?? {});
+  const fingerprint = getFingerprint({ raw: rawData });
 
-    return {
-        decryptFailed: true,
-        Sequence: ipnSequence,
-        route: routeName,
-        rawData,
-        error: "All keys failed",
-        __fingerprint: fingerprint,
-        __telegramThreadId: telegramThreadId
-    };
+  return {
+    decryptFailed: true,
+    Sequence: ipnSequence,
+    route: routeName,
+    rawData,
+    error: "All keys failed",
+    __fingerprint: fingerprint,
+    __telegramThreadId: telegramThreadId
+  };
 }
 
 function sanitizeLogForDisplay(logEntry) {
-    const output = { ...logEntry };
-    delete output.timestamp;
-    delete output.attempts;
-    delete output.error;
-    delete output.error;
-    delete output.status;
-    delete output.__skipTelegram;
-    delete output.__telegramThreadId;
-    delete output.__fingerprint;
-    return output;
+  const output = { ...logEntry };
+  delete output.timestamp;
+  delete output.attempts;
+  delete output.error;
+  delete output.error;
+  delete output.status;
+  delete output.__skipTelegram;
+  delete output.__telegramThreadId;
+  delete output.__fingerprint;
+  return output;
 }
 
 function renderLogPage() {
-    return `<!doctype html>
+  return `<!doctype html>
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
@@ -691,7 +708,7 @@ function renderLogPage() {
             '<span class="kv">duplicate: ' + esc(entry.duplicateInfo || "first_time") + '</span>',
           '</div>',
           '<div class="content">',
-            '<div><div class="block-title">Decrypted</div><pre>' + highlightJSON(entry.decrypted || {}) + '</pre></div>',
+            '<div><div class="block-title">Json data</div><pre>' + highlightJSON(entry.decrypted || {}) + '</pre></div>',
             '<div><div class="block-title">Validation</div>' + buildWarnings(entry.validation) + '</div>',
           '</div>'
         ].join("");
@@ -738,38 +755,38 @@ function renderLogPage() {
  * 📩 IPN ENDPOINTS
  */
 IPN_ROUTES.forEach((cfg) => {
-    app.post(cfg.path, createIPNHandler({ routeName: cfg.path, telegramThreadId: cfg.telegramThreadId }));
+  app.post(cfg.path, createIPNHandler({ routeName: cfg.path, telegramThreadId: cfg.telegramThreadId }));
 });
 
 /**
  * 📺 UI LOG ROUTES
  */
 app.get("/logs", (req, res) => {
-    res.type("html").send(renderLogPage());
+  res.type("html").send(renderLogPage());
 });
 
 app.get("/logs/history", (req, res) => {
-    res.json({ logs: [...ipnLogs].reverse() });
+  res.json({ logs: [...ipnLogs].reverse() });
 });
 
 app.get("/logs/stream", (req, res) => {
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache");
-    res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
-    res.write("retry: 3000\n\n");
-    sseClients.add(res);
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+  res.write("retry: 3000\n\n");
+  sseClients.add(res);
 
-    req.on("close", () => {
-        sseClients.delete(res);
-    });
+  req.on("close", () => {
+    sseClients.delete(res);
+  });
 });
 
 /**
  * ❤️ HEALTH CHECK
  */
 app.get("/", (req, res) => {
-    res.send("IPN Server Running 🚀 | UI: /logs");
+  res.send("IPN Server Running 🚀 | UI: /logs");
 });
 
 /**
@@ -778,10 +795,10 @@ app.get("/", (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
-    logJSON("SERVER_START", {
-        port: PORT,
-        message: "Server started successfully",
-        telegram: "https://t.me/zonkhanh",
-        owner: "zonkhanh"
-    });
-    }); 
+  logJSON("SERVER_START", {
+    port: PORT,
+    message: "Server started successfully",
+    telegram: "https://t.me/zonkhanh",
+    owner: "zonkhanh"
+  });
+}); 

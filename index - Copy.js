@@ -62,7 +62,7 @@ const IPN_ROUTES = [
     { path: "/yfe", telegramThreadId: 65 }
 ];
 
-const TELEGRAM_DEDUPE_TTL_MS = 15000;
+const TELEGRAM_DEDUPE_TTL_MS = 0;
 
 /**
  * 🧾 LOG HELPER (JSON chuẩn 100%)
@@ -344,6 +344,7 @@ function getTelegramValidationState(entry) {
     };
 }
 
+//Data hiện ở log telegram
 function formatTelegramMessage(entry) {
     if (entry?.decryptFailed) {
         const prefix = "⚠️ [IPN-LOG] Decrypt failed";
@@ -359,19 +360,26 @@ function formatTelegramMessage(entry) {
     const merchantLine = `🐳 Merchant: ${entry?.merchant || "-"}`;
     const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
     const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
-    const telegramPayload = {
-        Sequence: entry?.Sequence ?? null,
-        duplicateInfo: entry?.duplicateInfo ?? null,
-        decrypted: entry?.decrypted ?? null,
-        status: entry?.status ?? null,
-        merchant: entry?.merchant ?? null,
-        attempts: entry?.attempts ?? null,
-        error: entry?.error ?? null,
-        validation: entry?.validation ?? null
-    };
-    const prettyLog = JSON.stringify(telegramPayload, null, 2);
 
-    return `${prefix}\n${merchantLine}${posLine}\n\n${prettyLog}`;
+    // Validation block
+    const validation = entry?.validation;
+    let validationLine = "";
+    if (validation?.applied) {
+        const validStatus = validation.valid ? "PASS" : "FAIL";
+        validationLine = `\n📋 Validation [${validation.profile}]: ${validStatus}`;
+        if (!validation.valid) {
+            const bulletPoints = [
+                ...(validation.missingFields || []).map(f => `  • Missing: ${f}`),
+                ...(validation.errors || []).map(e => `  • ${e}`)
+            ].join("\n");
+            if (bulletPoints) validationLine += `\n${bulletPoints}`;
+        }
+    }
+
+    // In thẳng decrypted, không wrap
+    const prettyLog = JSON.stringify(entry?.decrypted ?? null, null, 2);
+
+    return `${prefix}\n${merchantLine}${posLine}${validationLine}\n\nDecrypted:\n${prettyLog}`;
 }
 
 function buildTelegramErrorLog(entry, errorInfo) {
@@ -494,6 +502,7 @@ function getFingerprint(payload) {
         .digest("hex");
 }
 
+// Data hiện ở log render
 function buildLogEntry({ body, log, validation }) {
     ipnSequence += 1;
     const Sequence = ipnSequence;
@@ -503,8 +512,8 @@ function buildLogEntry({ body, log, validation }) {
     const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
 
     return {
-        Sequence,
-        duplicateInfo,
+        // Sequence,
+        // duplicateInfo,
         ...log,
         validation,
         __fingerprint: fingerprint
@@ -691,7 +700,7 @@ function renderLogPage() {
             '<span class="kv">duplicate: ' + esc(entry.duplicateInfo || "first_time") + '</span>',
           '</div>',
           '<div class="content">',
-            '<div><div class="block-title">Decrypted</div><pre>' + highlightJSON(entry.decrypted || {}) + '</pre></div>',
+            '<div><div class="block-title">Json data</div><pre>' + highlightJSON(entry.decrypted || {}) + '</pre></div>',
             '<div><div class="block-title">Validation</div>' + buildWarnings(entry.validation) + '</div>',
           '</div>'
         ].join("");
