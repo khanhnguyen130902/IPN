@@ -9,6 +9,15 @@ const telegramQueue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 
 
 const app = express();
 app.use(express.json({ limit: "50kb" })); // Server có thể bị tấn công bằng payload khổng lồ
+
+const { Redis } = require("@upstash/redis");
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const REDIS_KEY = "ipn:logs";
 /**
  * 🔐 DANH SÁCH KEY (MAX 5)
  *
@@ -349,16 +358,21 @@ function validateIPNPayload(data) {
   };
 }
 
-function pushLog(entry) {
+async function pushLog(entry) {
+  // Vẫn giữ in-memory cho SSE realtime
   ipnLogs.push(entry);
-  if (ipnLogs.length > MAX_LOGS) {
-    ipnLogs.shift();
+  if (ipnLogs.length > MAX_LOGS) ipnLogs.shift();
+
+  // Lưu Redis
+  try {
+    await redis.lpush(REDIS_KEY, JSON.stringify(entry));
+    await redis.ltrim(REDIS_KEY, 0, MAX_LOGS - 1); // giữ tối đa MAX_LOGS
+  } catch (err) {
+    console.error("Redis pushLog error:", err.message);
   }
 
   const eventData = `data: ${JSON.stringify(entry)}\n\n`;
-  sseClients.forEach((res) => {
-    res.write(eventData);
-  });
+  sseClients.forEach((res) => res.write(eventData));
 
   if (!entry.__skipTelegram) {
     void pushLogToTelegram(entry);
@@ -569,7 +583,7 @@ function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
     decryptFailed: true,
     Sequence: ipnSequence,
     route: routeName,
-     receivedAt: Date.now(),
+    receivedAt: Date.now(),
     rawData,
     error: "All keys failed",
     __fingerprint: fingerprint,
@@ -1606,8 +1620,22 @@ app.get("/logs", (req, res) => {
   res.type("html").send(renderLogPage());
 });
 
-app.get("/logs/history", (req, res) => {
-  res.json({ logs: [...ipnLogs].reverse(), maxLogs: MAX_LOGS });
+app.get("/logs/history", async (req, res) => {
+  try {
+    const raw = await redis.lrange(REDIS_KEY, 0, MAX_LOGS - 1);
+    const logs = raw.map(item => typeof item === "string" ? JSON.parse(item) : item);
+    res.json({ logs, maxLogs: MAX_LOGS });
+  } catch (err) {
+    console.error("Redis history error:", err.message);
+    // fallback về in-memory nếu Redis lỗi
+    res.json({ logs: [...ipnLogs].reverse(), maxLogs: MAX_LOGS });
+  }
+});
+
+app.delete("/logs/clear", async (req, res) => {
+  ipnLogs.length = 0;
+  await redis.del(REDIS_KEY);
+  res.json({ ok: true });
 });
 
 app.get("/logs/stream", (req, res) => {
