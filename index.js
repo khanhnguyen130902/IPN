@@ -1425,9 +1425,9 @@ function renderLogPage() {
     }
     filtered.forEach(e => listEl.appendChild(buildListItem(e)));
     if (selectedSeq !== null) {
-      const el = listEl.querySelector('[data-seq="' + selectedSeq + '"]');
-      if (el) el.classList.add("active");
-    }
+    const el = listEl.querySelector('[data-seq="' + String(selectedSeq) + '"]');
+    if (el) el.classList.add("active");
+}
   }
 
   /* ── DETAIL ── */
