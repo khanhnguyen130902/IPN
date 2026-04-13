@@ -548,6 +548,7 @@ function buildLogEntry({ body, log, validation }) {
   return {
     Sequence,
     duplicateInfo,
+    receivedAt: Date.now(),
     ...log,
     validation,
     __fingerprint: fingerprint
@@ -568,6 +569,7 @@ function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
     decryptFailed: true,
     Sequence: ipnSequence,
     route: routeName,
+     receivedAt: Date.now(),
     rawData,
     error: "All keys failed",
     __fingerprint: fingerprint,
@@ -1374,7 +1376,7 @@ function renderLogPage() {
     const isDup    = entry.duplicateInfo && entry.duplicateInfo !== "first_time";
     const route    = entry.route || "-";
     const merchant = entry.merchant || (isFailed ? "decrypt failed" : "-");
-    const ts       = entry._ts || null;
+    const ts = entry.receivedAt || entry._ts || null;
 
     const li = document.createElement("div");
     li.className = "list-item" + (isFailed ? " failed" : "");
@@ -1555,7 +1557,7 @@ function renderLogPage() {
     const data = await res.json();
     MAX_LOGS   = data.maxLogs || 500;
 
-    (data.logs || []).forEach(e => { e._ts = null; allEntries.push(e); });
+    (data.logs || []).forEach(e => { e._ts = e.receivedAt || null; allEntries.push(e); });
     updateCounter();
     rebuildList();
     if (allEntries.length && !isMobile()) selectEntry(allEntries[0].Sequence);
