@@ -1434,7 +1434,7 @@ function renderLogPage() {
   function selectEntry(seq) {
     selectedSeq = seq;
     document.querySelectorAll(".list-item").forEach(el => {
-      el.classList.toggle("active", el.dataset.seq == seq);
+      el.classList.toggle("active", el.dataset.seq === String(seq));
     });
     const entry = allEntries.find(e => e.Sequence == seq);
     if (!entry) return;
@@ -1497,7 +1497,7 @@ function renderLogPage() {
       if (cardNo !== "-") html += infoCell("Card No", "•••• " + cardNo, "");
       if (bankCode !== "-") html += infoCell("Bank", bankCode, "");
       html += infoCell("Status", status, status === "SUCCESS" ? "green" : status !== "-" ? "red" : "");
-      html += infoCell("Duplicate", isDup ? entry.duplicateInfo : "first_time", isDup ? "yellow" : "");
+      html += infoCell("Transaction Type", entry.decrypted?.transactionType || "-", "");
       if (val && val.applied) html += infoCell("Validation", val.profile, "");
       html += '</div>';
 
