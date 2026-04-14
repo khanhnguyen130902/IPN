@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const crypto = require("crypto");
 
@@ -107,9 +109,27 @@ const MONITOR_THREAD_ID = 1820; // ← thay bằng thread ID thực của bạn
  */
 async function sendServerWakeAlert() {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-  const message = `🟢 IPN Server đã online\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`;
+  const message = `🟢 IPN Server online\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`;
   await sendTelegram(message, { threadId: MONITOR_THREAD_ID });
 }
+
+// 🔴 Alert khi server tắt bình thường (SIGTERM từ Render khi deploy/restart)
+process.on("SIGTERM", async () => {
+  const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+  await sendTelegram(`🔴 IPN Server offline (SIGTERM)\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`, {
+    threadId: MONITOR_THREAD_ID
+  });
+  process.exit(0);
+});
+
+// 🔴 Alert khi server crash (uncaught exception)
+process.on("uncaughtException", async (err) => {
+  const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
+  await sendTelegram(`💥 IPN Server crash\n🕐 ${now}\n❌ ${err.message}`, {
+    threadId: MONITOR_THREAD_ID
+  });
+  process.exit(1);
+});
 
 /**
  * 🧾 LOG HELPER (JSON chuẩn 100%)
@@ -378,10 +398,12 @@ async function pushLog(entry) {
   ipnLogs.push(entry);
   if (ipnLogs.length > MAX_LOGS) ipnLogs.shift();
 
-  // Lưu Redis
+  // Lưu Redis - gộp 2 lệnh thành 1 round-trip
   try {
-    await redis.lpush(REDIS_KEY, JSON.stringify(entry));
-    await redis.ltrim(REDIS_KEY, 0, MAX_LOGS - 1); // giữ tối đa MAX_LOGS
+    await redis.pipeline()
+      .lpush(REDIS_KEY, JSON.stringify(entry))
+      .ltrim(REDIS_KEY, 0, MAX_LOGS - 1)
+      .exec();
   } catch (err) {
     console.error("Redis pushLog error:", err.message);
   }
@@ -573,9 +595,11 @@ function buildLogEntry({ body, log, validation }) {
   const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
   duplicateCounter.set(fingerprint, duplicateCount);
   const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
+  const uid = `${Sequence}_${Date.now()}`;
 
   return {
     Sequence,
+    uid,
     duplicateInfo,
     receivedAt: Date.now(),
     ...log,
@@ -593,10 +617,12 @@ function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
   const rawData =
     body?.data !== undefined && body?.data !== null ? String(body.data) : JSON.stringify(body ?? {});
   const fingerprint = getFingerprint({ raw: rawData });
+  const uid = `${ipnSequence}_${Date.now()}`;
 
   return {
     decryptFailed: true,
     Sequence: ipnSequence,
+    uid,
     route: routeName,
     receivedAt: Date.now(),
     rawData,
@@ -1400,36 +1426,37 @@ function renderLogPage() {
 }
 
   /* ── LIST ITEM ── */
-  function buildListItem(entry) {
-    const isFailed = !!entry.decryptFailed;
-    const isDup    = entry.duplicateInfo && entry.duplicateInfo !== "first_time";
-    const route    = entry.route || "-";
-    const merchant = entry.merchant || (isFailed ? "decrypt failed" : "-");
-    const ts = entry.receivedAt || entry._ts || null;
+function buildListItem(entry) {
+  const isFailed = !!entry.decryptFailed;
+  const isDup    = entry.duplicateInfo && entry.duplicateInfo !== "first_time";
+  const route    = entry.route || "-";
+  const merchant = entry.merchant || (isFailed ? "decrypt failed" : "-");
+  const ts = entry.receivedAt || entry._ts || null;
 
-    const li = document.createElement("div");
-    li.className = "list-item" + (isFailed ? " failed" : "");
-    li.dataset.seq = entry.Sequence;
+  const li = document.createElement("div");
+  li.className = "list-item" + (isFailed ? " failed" : "");
+  li.dataset.seq = entry.uid; // ← chỉ set 1 lần, dùng uid
 
-    li.innerHTML =
-      '<div class="item-row1">' +
-        '<span class="seq-badge">#' + esc(entry.Sequence) + '</span>' +
-        '<span class="method-badge">POST</span>' +
-        '<span class="route-text">' + esc(route) + '</span>' +
-        '<span class="status-dot ' + (isFailed ? "fail" : "ok") + '"></span>' +
-      '</div>' +
-      '<div class="item-row2">' +
-        '<span class="merchant-text">' + esc(merchant) + '</span>' +
-        (isDup ? '<span class="dup-badge">DUP</span>' : '') +
-        (ts ? '<span class="time-text">' + esc(formatTime(ts)) + '</span>' : '') +
-      '</div>';
+  li.innerHTML =
+    '<div class="item-row1">' +
+      '<span class="seq-badge">#' + esc(entry.Sequence) + '</span>' +
+      '<span class="method-badge">POST</span>' +
+      '<span class="route-text">' + esc(route) + '</span>' +
+      '<span class="status-dot ' + (isFailed ? "fail" : "ok") + '"></span>' +
+    '</div>' +
+    '<div class="item-row2">' +
+      '<span class="merchant-text">' + esc(merchant) + '</span>' +
+      (isDup ? '<span class="dup-badge">DUP</span>' : '') +
+      (ts ? '<span class="time-text">' + esc(formatTime(ts)) + '</span>' : '') +
+    '</div>';
 
-    li.addEventListener("click", () => {
-      selectEntry(entry.Sequence);
-      if (isMobile()) mobileShowDetail();
-    });
-    return li;
-  }
+  li.addEventListener("click", () => {
+    selectEntry(entry.uid); // ← đúng key
+    if (isMobile()) mobileShowDetail();
+  });
+
+  return li;
+}
 
   function rebuildList() {
     const filtered = allEntries.filter(matchFilter);
@@ -1440,18 +1467,18 @@ function renderLogPage() {
     }
     filtered.forEach(e => listEl.appendChild(buildListItem(e)));
     if (selectedSeq !== null) {
-    const el = listEl.querySelector('[data-seq="' + String(selectedSeq) + '"]');
+   const el = listEl.querySelector('[data-seq="' + selectedSeq + '"]');
     if (el) el.classList.add("active");
 }
   }
 
   /* ── DETAIL ── */
-  function selectEntry(seq) {
-    selectedSeq = seq;
+  function selectEntry(uid){
+    selectedSeq = uid;
     listEl.querySelectorAll(".list-item").forEach(el => {
-    el.classList.toggle("active", el.dataset.seq === String(seq));
-    });
-    const entry = allEntries.find(e => e.Sequence == seq);
+    el.classList.toggle("active", el.dataset.seq === uid);
+  });
+  const entry = allEntries.find(e => e.uid === uid);
     if (!entry) return;
     renderDetail(entry);
   }
@@ -1589,7 +1616,7 @@ function renderLogPage() {
     (data.logs || []).forEach(e => { e._ts = e.receivedAt || null; allEntries.push(e); });
     updateCounter();
     rebuildList();
-    if (allEntries.length && !isMobile()) selectEntry(allEntries[0].Sequence);
+    if (allEntries.length && !isMobile()) selectEntry(allEntries[0].uid);
 
     const source = new EventSource("/logs/stream");
     source.onmessage = (event) => {
@@ -1597,19 +1624,19 @@ function renderLogPage() {
       pushEntry(entry);
       rebuildList();
 
-      const el = listEl.querySelector('[data-seq="' + entry.Sequence + '"]');
+      const el = listEl.querySelector('[data-seq="' + entry.uid + '"]');
       if (el) el.classList.add("new-flash");
 
       // auto-select on desktop; badge on mobile if viewing detail
       if (!isMobile()) {
-        if (selectedSeq === null) selectEntry(entry.Sequence);
+        if (selectedSeq === null) selectEntry(entry.uid);
       } else {
         if (mobileView === "detail") {
           newCount++;
           newBadge.textContent = newCount > 9 ? "9+" : newCount;
           newBadge.classList.add("visible");
         } else {
-          if (selectedSeq === null) selectEntry(entry.Sequence);
+          if (selectedSeq === null) selectEntry(entry.uid);
         }
       }
     };
@@ -1681,15 +1708,29 @@ app.get("/", (req, res) => {
  */
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, "0.0.0.0", async () => {
-  await initSequenceFromRedis(); // ← thêm dòng này
-  logJSON("SERVER_START", {
-    port: PORT,
-    message: "Server started successfully",
-    telegram: "https://t.me/zonkhanh",
-    owner: "zonkhanh"
-  });
+// app.listen(PORT, "0.0.0.0", async () => {
+//   await initSequenceFromRedis(); // ← thêm dòng này
+//   logJSON("SERVER_START", {
+//     port: PORT,
+//     message: "Server started successfully",
+//     telegram: "https://t.me/zonkhanh",
+//     owner: "zonkhanh"
+//   });
 
-  // 🔴 Alert Telegram khi server wake up
-  sendServerWakeAlert();
-});
+//   // 🔴 Alert Telegram khi server wake up
+//   sendServerWakeAlert();
+// });
+
+async function startServer() {
+  await initSequenceFromRedis();
+  app.listen(PORT, "0.0.0.0", () => {
+    logJSON("SERVER_START", {
+      port: PORT,
+      message: "Server started successfully",
+      telegram: "https://t.me/zonkhanh",
+      owner: "zonkhanh"
+    });
+    sendServerWakeAlert();
+  });
+}
+startServer();
