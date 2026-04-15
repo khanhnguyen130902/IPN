@@ -56,6 +56,10 @@ const AES_KEY_LIST = [
     name: "Bánh kẹo 2",
     key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161"
   },
+  {
+    name: "Mèo Ba Tư",
+    key: "79c416726ee73e529b681bf9247a76b639bea946b1abf53d6adf18658946d6d1"
+  },
 
 ].filter(item => item.key); // loại key null
 
