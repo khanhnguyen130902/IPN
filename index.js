@@ -64,7 +64,7 @@ const AES_KEY_LIST = [
 ].filter(item => item.key); // loại key null
 
 // 🧠 in-memory store để hiển thị UI log
-const MAX_LOGS = 10000;
+const MAX_LOGS = 650; // giới hạn log lưu trữ (cả Redis và in-memory)
 const ipnLogs = [];
 const sseClients = new Set();
 const duplicateCounter = new Map();
@@ -185,7 +185,8 @@ function isValidPayload(data) {
   return (
     data &&
     typeof data === "object" &&
-    (data.txnId || data.orderId || data.amount)
+    // (data.txnId || data.orderId || data.amount)
+    (data.amount)
   );
 }
 
