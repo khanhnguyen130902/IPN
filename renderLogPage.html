@@ -981,7 +981,11 @@
 
     function formatTime(ts) {
       if (!ts) return "";
-      return new Date(ts).toLocaleTimeString("vi-VN", { hour12: false });
+
+      return new Date(ts).toLocaleString("vi-VN", {
+        timeZone: "Asia/Ho_Chi_Minh",
+        hour12: false
+      });
     }
 
     function highlightJSON(obj) {

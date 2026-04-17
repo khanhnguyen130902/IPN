@@ -5,76 +5,169 @@ const crypto = require("crypto");
 const path = require("path");
 
 const { sendTelegram } = require("./ipn");
-// --- Tối ưu gửi Telegram: dùng queue để tránh nghẽn khi nhiều IPN đồng thời ---
 const PQueue = require("p-queue").default || require("p-queue");
-// Giới hạn: tối đa 5 message gửi đồng thời, 20 msg/giây
-const telegramQueue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 20 });
+// const telegramQueue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 20 });
 
 const app = express();
-app.use(express.json({ limit: "50kb" })); // Server có thể bị tấn công bằng payload khổng lồ
+app.use(express.json({ limit: "50kb" }));
 
 const { Redis } = require("@upstash/redis");
-
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 
+// =========================
+// REDIS KEYS
+// =========================
 const REDIS_KEY = "ipn:logs";
+const REDIS_AES_KEYS = "dashboard:aes_keys";
+const REDIS_IPN_ROUTES = "dashboard:ipn_routes";
+
+// =========================
+// SEED DATA (fallback khi Redis trống)
+// =========================
+const SEED_AES_KEYS = [
+  { name: "Dunk SG", key: "616c1b1a28401f20692f27c34f1eb2609d6993c90a440e37744202e6bfaefce4" },
+  { name: "Chè xôi bà Sáu", key: "7114514da32bc2c1c9956c508f608730464ab67b66ae66c649dbc6629f9bd035" },
+  { name: "Tabby VA", key: "8b2392c1d6a66cde222ce9946d795134a84c6a22831f7d27f35af6e119504df9" },
+  { name: "Fast Food KDC Kim Sơn", key: "049c05ad3f58adaa6def59cf7976656c00a7c5c4a63ba246432bcb3380cc9911" },
+  { name: "Apple Store Hà Nội", key: "c30e2793d2e3f8e22be9f77cb84d4c0753159767f3d63f52944f69f2bdcedf8b" },
+  { name: "Bánh kẹo 2", key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161" },
+  { name: "Mèo Ba Tư", key: "79c416726ee73e529b681bf9247a76b639bea946b1abf53d6adf18658946d6d1" },
+].filter(item => item.key);
+
+const SEED_IPN_ROUTES = [
+  { path: "/zonkhanh", telegramThreadId: null },
+  { path: "/mie", telegramThreadId: 63 },
+  { path: "/yfe", telegramThreadId: 65 },
+];
+
+// =========================
+// DYNAMIC CONFIG (in-memory, loaded from Redis)
+// =========================
+// Đánh dấu seed items để UI có thể ẩn/hiện
+const SEED_AES_KEY_KEYS = new Set(SEED_AES_KEYS.map(k => k.key));
+const SEED_IPN_ROUTE_PATHS = new Set(SEED_IPN_ROUTES.map(r => r.path));
+
+let aesKeyList = [...SEED_AES_KEYS];
+let ipnRoutes = [...SEED_IPN_ROUTES];
+
+// Dynamic Express router — swap khi config thay đổi
+let dynamicRouter = express.Router();
+app.use((req, res, next) => dynamicRouter(req, res, next));
+
+// =========================
+// DASHBOARD AUTH
+// =========================
+const DASHBOARD_SECRET = process.env.DASHBOARD_SECRET || crypto.randomBytes(32).toString("hex");
+// Map<token, expiresAt>
+const activeSessions = new Map();
+
+// Dọn session hết hạn mỗi 10 phút
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, exp] of activeSessions) {
+    if (now > exp) activeSessions.delete(token);
+  }
+}, 10 * 60 * 1000);
+
 /**
- * 🔐 DANH SÁCH KEY (MAX 5)
- *
- * 👉 Mỗi key gồm:
- * - name: tên merchant (hiển thị log)
- * - key: AES key dạng HEX (64 ký tự = 32 bytes)
- *
- * ⚠️ Ví dụ key:
- * "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+ * Tạo password hợp lệ cho thời điểm `date` (chấp nhận ±1 phút)
+ * Format: khanh.nq1309{HH}{mm}
  */
-const AES_KEY_LIST = [
-  {
-    name: "Dunk SG",
-    key: "616c1b1a28401f20692f27c34f1eb2609d6993c90a440e37744202e6bfaefce4"
-  },
-  {
-    name: "Chè xôi bà Sáu",
-    key: "7114514da32bc2c1c9956c508f608730464ab67b66ae66c649dbc6629f9bd035"
-  },
-  {
-    name: "Tabby VA",
-    key: "8b2392c1d6a66cde222ce9946d795134a84c6a22831f7d27f35af6e119504df9"
-  },
-  {
-    name: "Fast Food KDC Kim Sơn",
-    key: "049c05ad3f58adaa6def59cf7976656c00a7c5c4a63ba246432bcb3380cc9911"
-  },
-  {
-    name: "Apple Store Hà Nội",
-    key: "c30e2793d2e3f8e22be9f77cb84d4c0753159767f3d63f52944f69f2bdcedf8b"
-  },
-  {
-    name: "Bánh kẹo 2",
-    key: "fcdc9f6059a9d8867473ee787d3f131faea9926870569eb34c09751b117e3161"
-  },
-  {
-    name: "Mèo Ba Tư",
-    key: "79c416726ee73e529b681bf9247a76b639bea946b1abf53d6adf18658946d6d1"
-  },
+function validDashboardPasswords(date) {
+  const vn = new Date(date.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+  const candidates = [];
+  for (let delta = -1; delta <= 1; delta++) {
+    const d = new Date(vn.getTime() + delta * 60000);
+    const HH = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    candidates.push(`khanh.nq1309${HH}${mm}`);
+  }
+  return candidates;
+}
 
-].filter(item => item.key); // loại key null
+function isValidPassword(password) {
+  return validDashboardPasswords(new Date()).includes(password);
+}
 
-// 🧠 in-memory store để hiển thị UI log
-const MAX_LOGS = 30000; // giới hạn log lưu trữ (cả Redis và in-memory)
+function generateToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function requireDashboardAuth(req, res, next) {
+  const token = req.headers["x-dashboard-token"] || req.query._token;
+  if (!token) return res.status(401).json({ error: "Unauthorized" });
+  const exp = activeSessions.get(token);
+  if (!exp || Date.now() > exp) {
+    activeSessions.delete(token);
+    return res.status(401).json({ error: "Session expired" });
+  }
+  next();
+}
+
+// =========================
+// CONFIG LOADER/SAVER
+// =========================
+async function loadConfigFromRedis() {
+  try {
+    const [rawKeys, rawRoutes] = await Promise.all([
+      redis.get(REDIS_AES_KEYS),
+      redis.get(REDIS_IPN_ROUTES),
+    ]);
+
+    if (rawKeys) {
+      const parsed = typeof rawKeys === "string" ? JSON.parse(rawKeys) : rawKeys;
+      if (Array.isArray(parsed) && parsed.length > 0) aesKeyList = parsed;
+    } else {
+      // Seed lên Redis lần đầu
+      await redis.set(REDIS_AES_KEYS, JSON.stringify(SEED_AES_KEYS));
+      console.log("[INIT] Seeded AES keys to Redis");
+    }
+
+    if (rawRoutes) {
+      const parsed = typeof rawRoutes === "string" ? JSON.parse(rawRoutes) : rawRoutes;
+      if (Array.isArray(parsed) && parsed.length > 0) ipnRoutes = parsed;
+    } else {
+      await redis.set(REDIS_IPN_ROUTES, JSON.stringify(SEED_IPN_ROUTES));
+      console.log("[INIT] Seeded IPN routes to Redis");
+    }
+
+    console.log(`[INIT] Loaded ${aesKeyList.length} AES keys, ${ipnRoutes.length} IPN routes`);
+  } catch (err) {
+    console.error("[INIT] loadConfigFromRedis error:", err.message);
+    console.log("[INIT] Falling back to hardcoded seed data");
+  }
+}
+
+async function saveAesKeys() {
+  await redis.set(REDIS_AES_KEYS, JSON.stringify(aesKeyList));
+}
+
+async function saveIpnRoutes() {
+  await redis.set(REDIS_IPN_ROUTES, JSON.stringify(ipnRoutes));
+}
+
+// =========================
+// CONSTANTS
+// =========================
+const MAX_LOGS = 30000;
+const MONITOR_THREAD_ID = 1820;
+
+// =========================
+// IN-MEMORY STATE
+// =========================
 const ipnLogs = [];
 const sseClients = new Set();
 const duplicateCounter = new Map();
-const telegramDedupe = new Map(); // key -> lastSentAtMs (best-effort)
+const telegramDedupe = new Map();
 const TELEGRAM_DEDUPE_TTL_MS = 0;
 let ipnSequence = 0;
 
 async function initSequenceFromRedis() {
   try {
-    const raw = await redis.lrange(REDIS_KEY, 0, 0); // lấy entry mới nhất
+    const raw = await redis.lrange(REDIS_KEY, 0, 0);
     if (raw && raw.length > 0) {
       const entry = typeof raw[0] === "string" ? JSON.parse(raw[0]) : raw[0];
       if (entry?.Sequence) {
@@ -95,30 +188,14 @@ setInterval(() => {
 }, 60_000);
 
 // =========================
-// ROUTE CONFIG (dễ mở rộng)
+// SERVER ALERTS
 // =========================
-// Muốn thêm route mới + topic mới:
-// - Thêm 1 dòng vào IPN_ROUTES (path + telegramThreadId)
-// - Không cần sửa logic decrypt/validate/log
-const IPN_ROUTES = [
-  { path: "/zonkhanh", telegramThreadId: undefined }, // dùng default topic trong ipn.js
-  { path: "/mie", telegramThreadId: 63 },
-  { path: "/yfe", telegramThreadId: 65 }
-];
-
-// 🔴 Monitor alert thread ID (topic "IPN Monitor" trong group)
-const MONITOR_THREAD_ID = 1820; // ← thay bằng thread ID thực của bạn
-
-/**
- * 🔴 Gửi alert Telegram khi server start (wake up sau sleep)
- */
 async function sendServerWakeAlert() {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
   const message = `🟢 IPN Server online\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`;
   await sendTelegram(message, { threadId: MONITOR_THREAD_ID });
 }
 
-// 🔴 Alert khi server tắt bình thường (SIGTERM từ Render khi deploy/restart)
 process.on("SIGTERM", async () => {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
   await sendTelegram(`🔴 IPN Server offline (SIGTERM)\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`, {
@@ -127,7 +204,6 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 
-// 🔴 Alert khi server crash (uncaught exception)
 process.on("uncaughtException", async (err) => {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
   await sendTelegram(`💥 IPN Server crash\n🕐 ${now}\n❌ ${err.message}`, {
@@ -136,16 +212,13 @@ process.on("uncaughtException", async (err) => {
   process.exit(1);
 });
 
-/**
- * 🧾 LOG HELPER (JSON chuẩn 100%)
- */
+// =========================
+// HELPERS
+// =========================
 function logJSON(type, data) {
   const frame = "-".repeat(72);
   console.log(frame);
-  console.log(JSON.stringify({
-    type,
-    ...data
-  }, null, 2));
+  console.log(JSON.stringify({ type, ...data }, null, 2));
   console.log(frame);
 }
 
@@ -158,82 +231,47 @@ function logIPN(type, entry) {
   console.log(frame);
 }
 
-/**
- * 🔓 AES-256-CBC decrypt
- */
+// =========================
+// AES / DECRYPT
+// =========================
 function decryptAES(encryptedHex, keyHex) {
   const key = Buffer.from(keyHex, "hex");
-
   const ivHex = encryptedHex.substring(0, 32);
   const dataHex = encryptedHex.substring(32);
-
   const iv = Buffer.from(ivHex, "hex");
   const encrypted = Buffer.from(dataHex, "hex");
-
   const decipher = crypto.createDecipheriv("aes-256-cbc", key, iv);
-
   let decrypted = decipher.update(encrypted);
   decrypted = Buffer.concat([decrypted, decipher.final()]);
-
   return JSON.parse(decrypted.toString("utf8"));
 }
 
-/**
- * ✅ Validate payload
- */
 function isValidPayload(data) {
-  return (
-    data &&
-    typeof data === "object" &&
-    // (data.txnId || data.orderId || data.amount)
-    (data.amount)
-  );
+  return data && typeof data === "object" && data.amount;
 }
 
-/**
- * 🔁 Multi-key decrypt
- */
 function decryptWithKeys(encryptedHex) {
   let attempts = 0;
-
-  for (const item of AES_KEY_LIST) {
+  for (const item of aesKeyList) {
     attempts++;
-
     try {
       const data = decryptAES(encryptedHex, item.key);
-
-      if (isValidPayload(data)) {
-        return {
-          success: true,
-          data,
-          merchant: item.name,
-          attempts
-        };
-      }
-    } catch (err) {
-      // bỏ qua key lỗi
-    }
+      if (isValidPayload(data)) return { success: true, data, merchant: item.name, attempts };
+    } catch (_) { }
   }
-
   return { success: false, attempts };
 }
 
-/**
- * ✅ Validate payload theo rule CARD/QR
- */
+// =========================
+// VALIDATION
+// =========================
 function validateIPNPayload(data) {
   const paymentType = data?.paymentType;
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
   const hasValue = (value) => value !== undefined && value !== null && value !== "";
 
   if (paymentType !== "CARD" && paymentType !== "QR") {
-    return {
-      applied: false,
-      profile: "normal",
-      valid: true,
-      missingFields: [],
-      errors: []
-    };
+    return { applied: false, profile: "normal", valid: true, missingFields: [], errors: [] };
   }
 
   const errors = [];
@@ -243,144 +281,62 @@ function validateIPNPayload(data) {
   if (paymentType === "CARD") {
     const isMasterMerchant = hasOwn(data, "cardOrigin");
     const requiredMasterFields = [
-      "requestId",
-      "orderId",
-      "paymentType",
-      "transactionType",
-      "txnId",
-      "serialNo",
-      "posEntryMode",
-      "tid",
-      "mid",
-      "batchNo",
-      "authIdResponse",
-      "retrievalRefNo",
-      "cardNo",
-      "cardType",
-      "bankCode",
-      "invoiceNo",
-      "requestAmount",
-      "tipAmount",
-      "billUrl",
-      "originalTransactionDate",
-      "createdUnixTime",
-      "updatedUnixTime",
-      "isSettle",
-      "settleUnixTime",
-      "isVoid",
-      "voidUnixTime",
-      "isReversal",
-      "reversalUnixTime",
-      "responseCode",
-      "systemTraceNo",
-      "cardOrigin",
-      "extraData",
-      "referenceRefNo"
+      "requestId", "orderId", "paymentType", "transactionType", "txnId", "serialNo",
+      "posEntryMode", "tid", "mid", "batchNo", "authIdResponse", "retrievalRefNo",
+      "cardNo", "cardType", "bankCode", "invoiceNo", "requestAmount", "tipAmount",
+      "billUrl", "originalTransactionDate", "createdUnixTime", "updatedUnixTime",
+      "isSettle", "settleUnixTime", "isVoid", "voidUnixTime", "isReversal",
+      "reversalUnixTime", "responseCode", "systemTraceNo", "cardOrigin", "extraData", "referenceRefNo"
     ];
     const requiredMerchantFields = [
-      "requestId",
-      "orderId",
-      "amount",
-      "tip",
-      "paymentType",
-      "narrative",
-      "fromAccNo",
-      "extraData",
-      "authIdResponse",
-      "retrievalRefNo",
-      "cardNo",
-      "referenceRefNo",
-      "status"
+      "requestId", "orderId", "amount", "tip", "paymentType", "narrative", "fromAccNo",
+      "extraData", "authIdResponse", "retrievalRefNo", "cardNo", "referenceRefNo", "status"
     ];
-
     const requiredFields = isMasterMerchant ? requiredMasterFields : requiredMerchantFields;
     missingFields = requiredFields.filter((field) => !hasOwn(data, field));
     profile = isMasterMerchant ? "master-merchant-card" : "merchant-card";
 
-    if (!hasValue(data?.orderId)) {
-      errors.push("orderId must have data");
-    }
-
+    if (!hasValue(data?.orderId)) errors.push("orderId must have data");
     if (!hasValue(data?.referenceRefNo)) {
       errors.push("referenceRefNo must have data");
     } else if (hasValue(data?.orderId) && data.referenceRefNo !== data.orderId) {
       errors.push("referenceRefNo must equal orderId");
     }
-
     if (hasOwn(data, "extraData")) {
-      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData))
         errors.push("extraData must be an object");
-      }
     }
   }
 
   if (paymentType === "QR") {
     const isMasterMerchantQR = hasOwn(data, "detailTransaction");
     const requiredMasterQRFields = [
-      "requestId",
-      "orderId",
-      "amount",
-      "tip",
-      "paymentType",
-      "narrative",
-      "fromAccNo",
-      "accNo",
-      "extraData",
-      "detailTransaction"
+      "requestId", "orderId", "amount", "tip", "paymentType", "narrative",
+      "fromAccNo", "accNo", "extraData", "detailTransaction"
     ];
     const requiredMerchantQRFields = [
-      "requestId",
-      "orderId",
-      "amount",
-      "tip",
-      "paymentType",
-      "narrative",
-      "fromAccNo",
-      "accNo",
-      "trnRefNo",
-      "extraData"
+      "requestId", "orderId", "amount", "tip", "paymentType", "narrative",
+      "fromAccNo", "accNo", "trnRefNo", "extraData"
     ];
-
     const requiredFields = isMasterMerchantQR ? requiredMasterQRFields : requiredMerchantQRFields;
     missingFields = requiredFields.filter((field) => !hasOwn(data, field));
     profile = isMasterMerchantQR ? "master-merchant-qr" : "merchant-qr";
 
-    if (!hasValue(data?.accNo)) {
-      errors.push("accNo must have data");
-    }
-
+    if (!hasValue(data?.accNo)) errors.push("accNo must have data");
     if (hasOwn(data, "extraData")) {
-      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData)) {
+      if (!data.extraData || typeof data.extraData !== "object" || Array.isArray(data.extraData))
         errors.push("extraData must be an object");
-      }
     }
-
     if (isMasterMerchantQR) {
       const detail = data?.detailTransaction;
       if (!detail || typeof detail !== "object" || Array.isArray(detail)) {
         errors.push("detailTransaction must be an object");
       } else {
         const requiredDetailFields = [
-          "externalRefNo",
-          "trnRefNo",
-          "acEntrySrNo",
-          "accNo",
-          "source",
-          "ccy",
-          "drcr",
-          "lcyAmount",
-          "valueDt",
-          "txnInitDt",
-          "relatedAccount",
-          "relatedAccountName",
-          "narrative",
-          "clientUserID",
-          "channel",
-          "fromAccNo",
-          "fromAccName",
-          "fromBankCode",
-          "fromBankName",
-          "napasTraceId"
+          "externalRefNo", "trnRefNo", "acEntrySrNo", "accNo", "source", "ccy", "drcr",
+          "lcyAmount", "valueDt", "txnInitDt", "relatedAccount", "relatedAccountName",
+          "narrative", "clientUserID", "channel", "fromAccNo", "fromAccName",
+          "fromBankCode", "fromBankName", "napasTraceId"
         ];
         const missingDetailFields = requiredDetailFields
           .filter((field) => !hasOwn(detail, field))
@@ -391,20 +347,18 @@ function validateIPNPayload(data) {
   }
 
   return {
-    applied: true,
-    profile,
+    applied: true, profile,
     valid: missingFields.length === 0 && errors.length === 0,
-    missingFields,
-    errors
+    missingFields, errors
   };
 }
 
+// =========================
+// LOG HELPERS
+// =========================
 async function pushLog(entry) {
-  // Vẫn giữ in-memory cho SSE realtime
   ipnLogs.push(entry);
   if (ipnLogs.length > MAX_LOGS) ipnLogs.shift();
-
-  // Lưu Redis - gộp 2 lệnh thành 1 round-trip
   try {
     await redis.pipeline()
       .lpush(REDIS_KEY, JSON.stringify(entry))
@@ -413,27 +367,18 @@ async function pushLog(entry) {
   } catch (err) {
     console.error("Redis pushLog error:", err.message);
   }
-
   const eventData = `data: ${JSON.stringify(entry)}\n\n`;
   sseClients.forEach((res) => res.write(eventData));
-
-  if (!entry.__skipTelegram) {
-    void pushLogToTelegram(entry);
-  }
+  if (!entry.__skipTelegram) void pushLogToTelegram(entry);
 }
 
 function getTelegramValidationState(entry) {
   const profile = entry?.validation?.profile;
   const isCardProfile = profile === "master-merchant-card" || profile === "merchant-card";
   const isInvalid = isCardProfile && entry?.validation?.applied && !entry?.validation?.valid;
-
-  return {
-    isCardProfile,
-    isInvalid
-  };
+  return { isCardProfile, isInvalid };
 }
 
-//Data hiện ở log telegram
 function formatTelegramMessage(entry) {
   if (entry?.decryptFailed) {
     const prefix = "⚠️ [IPN-LOG] Decrypt failed";
@@ -441,7 +386,6 @@ function formatTelegramMessage(entry) {
     const raw = entry?.rawData != null ? String(entry.rawData) : "";
     return `${prefix}\n${routeLine}\n\nraw data:\n${raw}`;
   }
-
   const { isInvalid } = getTelegramValidationState(entry);
   const statusIcon = isInvalid ? "❌" : "✅";
   const invalidTag = isInvalid ? " [INVALID]" : "";
@@ -449,8 +393,6 @@ function formatTelegramMessage(entry) {
   const merchantLine = `🐳 Merchant: ${entry?.merchant || "-"}`;
   const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
   const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
-
-  // Validation block
   const validation = entry?.validation;
   let validationLine = "";
   if (validation?.applied) {
@@ -464,39 +406,25 @@ function formatTelegramMessage(entry) {
       if (bulletPoints) validationLine += `\n${bulletPoints}`;
     }
   }
-
-  // In thẳng decrypted, không wrap
   const prettyLog = JSON.stringify(entry?.decrypted ?? null, null, 2);
-
   return `${prefix}\n${merchantLine}${posLine}${validationLine}\n\nDecrypted:\n${prettyLog}`;
 }
 
 function buildTelegramErrorLog(entry, errorInfo) {
   ipnSequence += 1;
-
   return {
     Sequence: ipnSequence,
     duplicateInfo: "system",
     status: "telegram_error",
     merchant: entry?.merchant || null,
     decrypted: entry?.decrypted || null,
-    validation: entry?.validation || {
-      applied: false,
-      profile: "normal",
-      valid: true,
-      missingFields: [],
-      errors: []
-    },
-    telegram: {
-      error: errorInfo?.error?.message || "Unknown telegram error",
-      attempt: errorInfo?.attempt || 0
-    },
+    validation: entry?.validation || { applied: false, profile: "normal", valid: true, missingFields: [], errors: [] },
+    telegram: { error: errorInfo?.error?.message || "Unknown telegram error", attempt: errorInfo?.attempt || 0 },
     __skipTelegram: true
   };
 }
 
 async function pushLogToTelegram(entry) {
-  // best-effort chống gửi trùng do IPN retry / network timeout
   const threadId = entry?.__telegramThreadId ?? "default";
   const fingerprint = entry?.__fingerprint;
   if (fingerprint) {
@@ -506,8 +434,6 @@ async function pushLogToTelegram(entry) {
     if (last && now - last < TELEGRAM_DEDUPE_TTL_MS) return;
     telegramDedupe.set(key, now);
   }
-
-  // Đưa task gửi Telegram vào queue để kiểm soát tốc độ và số lượng gửi đồng thời
   telegramQueue.add(async () => {
     const message = formatTelegramMessage(entry);
     const result = await sendTelegram(message, { maxRetries: 3, threadId: entry?.__telegramThreadId });
@@ -519,39 +445,57 @@ async function pushLogToTelegram(entry) {
   });
 }
 
+function getFingerprint(payload) {
+  return crypto.createHash("sha256").update(JSON.stringify(payload || {})).digest("hex");
+}
+
+function buildLogEntry({ body, log, validation }) {
+  ipnSequence += 1;
+  const Sequence = ipnSequence;
+  const fingerprint = getFingerprint(log.decrypted || body);
+  const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
+  duplicateCounter.set(fingerprint, duplicateCount);
+  const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
+  const uid = `${Sequence}_${Date.now()}`;
+  return { Sequence, uid, duplicateInfo, receivedAt: Date.now(), ...log, validation, __fingerprint: fingerprint };
+}
+
+function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
+  ipnSequence += 1;
+  const rawData = body?.data !== undefined && body?.data !== null ? String(body.data) : JSON.stringify(body ?? {});
+  const fingerprint = getFingerprint({ raw: rawData });
+  const uid = `${ipnSequence}_${Date.now()}`;
+  return {
+    decryptFailed: true, Sequence: ipnSequence, uid, route: routeName,
+    receivedAt: Date.now(), rawData, error: "All keys failed",
+    __fingerprint: fingerprint, __telegramThreadId: telegramThreadId
+  };
+}
+
+function sanitizeLogForDisplay(logEntry) {
+  const output = { ...logEntry };
+  delete output.timestamp; delete output.attempts; delete output.error;
+  delete output.status; delete output.__skipTelegram;
+  delete output.__telegramThreadId; delete output.__fingerprint;
+  return output;
+}
+
+// =========================
+// IPN HANDLER FACTORY
+// =========================
 function createIPNHandler({ routeName, telegramThreadId }) {
   return (req, res) => {
     const body = req.body;
-
-    // ✅ trả response ngay (QUAN TRỌNG)
     res.status(200).json({ status: "received" });
-
     setImmediate(() => {
-      const log = {
-        decrypted: null,
-        status: "pending",
-        merchant: null,
-        attempts: 0,
-        error: null
-      };
-
+      const log = { decrypted: null, status: "pending", merchant: null, attempts: 0, error: null };
       try {
         const encryptedHex = body?.data;
-
-        if (!encryptedHex) {
-          throw new Error("Missing data field");
-        }
-
+        if (!encryptedHex) throw new Error("Missing data field");
         const result = decryptWithKeys(encryptedHex);
-
         log.attempts = result.attempts;
-
-        if (!result.success) {
-          throw new Error("All keys failed");
-        }
-
+        if (!result.success) throw new Error("All keys failed");
         const decrypted = result.data;
-
         log.decrypted = decrypted;
         log.merchant = result.merchant;
         log.status = "success";
@@ -561,19 +505,13 @@ function createIPNHandler({ routeName, telegramThreadId }) {
         uiLog.route = routeName;
         pushLog(uiLog);
         logIPN("IPN_SUCCESS", uiLog);
-
       } catch (err) {
         if (err.message === "All keys failed") {
           const uiLog = buildDecryptFailedLogEntry({ body, routeName, telegramThreadId });
           pushLog(uiLog);
-          logJSON("IPN_ERROR", {
-            route: routeName,
-            error: err.message,
-            rawData: body?.data !== undefined && body?.data !== null ? body.data : body
-          });
+          logJSON("IPN_ERROR", { route: routeName, error: err.message, rawData: body?.data ?? body });
         } else {
-          log.status = "error";
-          log.error = err.message;
+          log.status = "error"; log.error = err.message;
           const validation = validateIPNPayload(log.decrypted);
           const uiLog = buildLogEntry({ body, log, validation });
           uiLog.__telegramThreadId = telegramThreadId;
@@ -586,85 +524,32 @@ function createIPNHandler({ routeName, telegramThreadId }) {
   };
 }
 
-function getFingerprint(payload) {
-  return crypto
-    .createHash("sha256")
-    .update(JSON.stringify(payload || {}))
-    .digest("hex");
+// =========================
+// DYNAMIC ROUTER — rebuild khi config thay đổi
+// =========================
+function rebuildDynamicRouter() {
+  const router = express.Router();
+  ipnRoutes.forEach((cfg) => {
+    router.post(cfg.path, createIPNHandler({
+      routeName: cfg.path,
+      telegramThreadId: cfg.telegramThreadId ?? undefined
+    }));
+  });
+  dynamicRouter = router;
+  console.log(`[ROUTER] Rebuilt with ${ipnRoutes.length} IPN routes:`, ipnRoutes.map(r => r.path));
 }
 
-// Data hiện ở log render
-function buildLogEntry({ body, log, validation }) {
-  ipnSequence += 1;
-  const Sequence = ipnSequence;
-  const fingerprint = getFingerprint(log.decrypted || body);
-  const duplicateCount = (duplicateCounter.get(fingerprint) || 0) + 1;
-  duplicateCounter.set(fingerprint, duplicateCount);
-  const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
-  const uid = `${Sequence}_${Date.now()}`;
-
-  return {
-    Sequence,
-    uid,
-    duplicateInfo,
-    receivedAt: Date.now(),
-    ...log,
-    validation,
-    __fingerprint: fingerprint
-  };
-}
-
-/**
- * Log tối giản khi không decrypt được: chỉ raw `data` + route, không Sequence/validation/...
- */
-function buildDecryptFailedLogEntry({ body, routeName, telegramThreadId }) {
-  ipnSequence += 1;
-  const rawData =
-    body?.data !== undefined && body?.data !== null ? String(body.data) : JSON.stringify(body ?? {});
-  const fingerprint = getFingerprint({ raw: rawData });
-  const uid = `${ipnSequence}_${Date.now()}`;
-
-  return {
-    decryptFailed: true,
-    Sequence: ipnSequence,
-    uid,
-    route: routeName,
-    receivedAt: Date.now(),
-    rawData,
-    error: "All keys failed",
-    __fingerprint: fingerprint,
-    __telegramThreadId: telegramThreadId
-  };
-}
-
-function sanitizeLogForDisplay(logEntry) {
-  const output = { ...logEntry };
-  delete output.timestamp;
-  delete output.attempts;
-  delete output.error;
-  delete output.status;
-  delete output.__skipTelegram;
-  delete output.__telegramThreadId;
-  delete output.__fingerprint;
-  return output;
-}
-
-/**
- * 📩 IPN ENDPOINTS
- */
-IPN_ROUTES.forEach((cfg) => {
-  app.post(cfg.path, createIPNHandler({ routeName: cfg.path, telegramThreadId: cfg.telegramThreadId }));
-});
-
-/**
- * 📺 UI LOG ROUTES
- */
+// =========================
+// STATIC ROUTES (log UI)
+// =========================
 const LOG_PAGE_PATH = path.join(__dirname, "renderLogPage.html");
+const DASHBOARD_PAGE_PATH = path.join(__dirname, "dashboard.html");
 
-app.get("/logs", (req, res) => {
-  res.sendFile(LOG_PAGE_PATH);
-});
+app.get("/logs", (req, res) => res.sendFile(LOG_PAGE_PATH));
 
+// QUAN TRỌNG: /logs/history và /logs/stream phải đứng TRƯỚC /logs/:route
+// vì Express match theo thứ tự — nếu /:route đứng trước, "history" và "stream"
+// sẽ bị bắt như route param thay vì vào đúng handler.
 app.get("/logs/history", async (req, res) => {
   try {
     const raw = await redis.lrange(REDIS_KEY, 0, MAX_LOGS - 1);
@@ -672,7 +557,6 @@ app.get("/logs/history", async (req, res) => {
     res.json({ logs, maxLogs: MAX_LOGS });
   } catch (err) {
     console.error("Redis history error:", err.message);
-    // fallback về in-memory nếu Redis lỗi
     res.json({ logs: [...ipnLogs].reverse(), maxLogs: MAX_LOGS });
   }
 });
@@ -690,37 +574,145 @@ app.get("/logs/stream", (req, res) => {
   res.flushHeaders();
   res.write("retry: 3000\n\n");
   sseClients.add(res);
-
-  req.on("close", () => {
-    sseClients.delete(res);
-  });
+  req.on("close", () => sseClients.delete(res));
 });
 
-app.get("/logs/:route", (req, res) => {
-  res.sendFile(LOG_PAGE_PATH);
-});
-/**
- * ❤️ HEALTH CHECK
- */
-app.get("/", (req, res) => {
-  res.send("IPN Server Running 🚀 | UI: /logs");
+// Phải đứng SAU /logs/history, /logs/stream, /logs/clear
+app.get("/logs/:route", (req, res) => res.sendFile(LOG_PAGE_PATH));
+
+// =========================
+// DASHBOARD ROUTES
+// =========================
+app.get("/dashboard", (req, res) => res.sendFile(DASHBOARD_PAGE_PATH));
+
+// Login
+app.post("/dashboard/login", (req, res) => {
+  const { password } = req.body;
+  if (!password || !isValidPassword(password)) {
+    return res.status(401).json({ error: "Sai mật khẩu hoặc đã hết hiệu lực" });
+  }
+  const token = generateToken();
+  activeSessions.set(token, Date.now() + 60 * 60 * 1000); // 1 giờ
+  res.json({ token });
 });
 
-/**
- * 🚀 START SERVER
- */
+// Verify token
+app.get("/dashboard/verify", requireDashboardAuth, (req, res) => {
+  res.json({ ok: true });
+});
+
+// --- AES Keys API ---
+app.get("/dashboard/aes-keys", requireDashboardAuth, (req, res) => {
+  // Trả về list nhưng mask key (chỉ show 8 ký tự đầu + ... + 8 cuối)
+  const masked = aesKeyList.map((item, idx) => ({
+    idx,
+    name: item.name,
+    keyPreview: item.key.length > 16
+      ? item.key.slice(0, 8) + "..." + item.key.slice(-8)
+      : "***",
+    isSeed: SEED_AES_KEY_KEYS.has(item.key)
+  }));
+  res.json({ keys: masked });
+});
+
+app.post("/dashboard/aes-keys", requireDashboardAuth, async (req, res) => {
+  const { name, key } = req.body;
+  if (!name || typeof name !== "string" || !name.trim())
+    return res.status(400).json({ error: "Thiếu tên merchant" });
+  if (!key || typeof key !== "string" || !/^[0-9a-fA-F]{64}$/.test(key.trim()))
+    return res.status(400).json({ error: "AES key phải là HEX 64 ký tự (32 bytes)" });
+  if (aesKeyList.some(k => k.key === key.trim()))
+    return res.status(400).json({ error: "Key này đã tồn tại" });
+
+  aesKeyList.push({ name: name.trim(), key: key.trim() });
+  await saveAesKeys();
+  logJSON("DASHBOARD", { action: "ADD_AES_KEY", name: name.trim() });
+  res.json({ ok: true, total: aesKeyList.length });
+});
+
+app.delete("/dashboard/aes-keys/:idx", requireDashboardAuth, async (req, res) => {
+  const idx = Number(req.params.idx);
+  if (isNaN(idx) || idx < 0 || idx >= aesKeyList.length)
+    return res.status(400).json({ error: "Index không hợp lệ" });
+  const removed = aesKeyList.splice(idx, 1)[0];
+  await saveAesKeys();
+  logJSON("DASHBOARD", { action: "DELETE_AES_KEY", name: removed.name });
+  res.json({ ok: true, removed: removed.name });
+});
+
+// --- IPN Routes API ---
+app.get("/dashboard/ipn-routes", requireDashboardAuth, (req, res) => {
+  const routes = ipnRoutes.map((r, i) => ({
+    ...r,
+    idx: i,
+    isSeed: SEED_IPN_ROUTE_PATHS.has(r.path)
+  }));
+  res.json({ routes });
+});
+
+app.post("/dashboard/ipn-routes", requireDashboardAuth, async (req, res) => {
+  let { path: routePath, telegramThreadId } = req.body;
+  if (!routePath || typeof routePath !== "string")
+    return res.status(400).json({ error: "Thiếu path" });
+  if (!routePath.startsWith("/")) routePath = "/" + routePath;
+  routePath = routePath.trim().replace(/\s/g, "");
+
+  // Bảo vệ các route hệ thống: exact match "/" và prefix match cho /logs, /dashboard
+  const isRootPath = routePath === "/";
+  const isSystemPrefix = ["/logs", "/dashboard"].some(r => routePath === r || routePath.startsWith(r + "/"));
+  if (isRootPath || isSystemPrefix)
+    return res.status(400).json({ error: `Path '${routePath}' là route hệ thống, không được dùng` });
+  if (ipnRoutes.some(r => r.path === routePath))
+    return res.status(400).json({ error: `Route '${routePath}' đã tồn tại` });
+
+  const threadId = telegramThreadId !== undefined && telegramThreadId !== ""
+    ? Number(telegramThreadId)
+    : null;
+
+  ipnRoutes.push({ path: routePath, telegramThreadId: threadId });
+  await saveIpnRoutes();
+  rebuildDynamicRouter();
+  logJSON("DASHBOARD", { action: "ADD_IPN_ROUTE", path: routePath, telegramThreadId: threadId });
+  res.json({ ok: true, total: ipnRoutes.length });
+});
+
+app.delete("/dashboard/ipn-routes/:idx", requireDashboardAuth, async (req, res) => {
+  const idx = Number(req.params.idx);
+  if (isNaN(idx) || idx < 0 || idx >= ipnRoutes.length)
+    return res.status(400).json({ error: "Index không hợp lệ" });
+  const removed = ipnRoutes.splice(idx, 1)[0];
+  await saveIpnRoutes();
+  rebuildDynamicRouter();
+  logJSON("DASHBOARD", { action: "DELETE_IPN_ROUTE", path: removed.path });
+  res.json({ ok: true, removed: removed.path });
+});
+
+// =========================
+// HEALTH CHECK
+// =========================
+app.get("/", (req, res) => res.send("IPN Server Running 🚀 | UI: /logs | Dashboard: /dashboard"));
+
+// =========================
+// START
+// =========================
 const PORT = process.env.PORT || 3000;
 
 async function startServer() {
+  await loadConfigFromRedis();
   await initSequenceFromRedis();
+  rebuildDynamicRouter();
+
   app.listen(PORT, "0.0.0.0", () => {
     logJSON("SERVER_START", {
       port: PORT,
       message: "Server started successfully",
+      aesKeys: aesKeyList.length,
+      ipnRoutes: ipnRoutes.map(r => r.path),
       telegram: "https://t.me/zonkhanh",
       owner: "zonkhanh"
     });
     sendServerWakeAlert();
   });
 }
+
 startServer();

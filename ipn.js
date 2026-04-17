@@ -1,6 +1,7 @@
-const BOT_TOKEN = "8489600440:AAHOFGM-xj9x8bc5GtfK6r2bTdwStI4iqeQ";
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID || "-1003979672209";
-const DEFAULT_MESSAGE_THREAD_ID = Number(process.env.TELEGRAM_TOPIC_ID || "6");
+// const BOT_TOKEN = "8489600440:AAHOFGM-xj9x8bc5GtfK6r2bTdwStI4iqeQ";
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const DEFAULT_MESSAGE_THREAD_ID = Number(process.env.TELEGRAM_TOPIC_ID);
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
