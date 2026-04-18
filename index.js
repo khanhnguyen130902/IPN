@@ -6,7 +6,7 @@ const path = require("path");
 
 const { sendTelegram } = require("./ipn");
 const PQueue = require("p-queue").default || require("p-queue");
-// const telegramQueue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 20 });
+const telegramQueue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 20 });
 
 const app = express();
 app.use(express.json({ limit: "50kb" }));
@@ -198,17 +198,33 @@ async function sendServerWakeAlert() {
 
 process.on("SIGTERM", async () => {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-  await sendTelegram(`🔴 IPN Server offline (SIGTERM)\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`, {
-    threadId: MONITOR_THREAD_ID
-  });
+  const message = `🔴 IPN Server offline (SIGTERM)\n🕐 ${now}\n🌐 https://ipn-server.onrender.com`;
+
+  try {
+    await Promise.race([
+      sendTelegram(message, { threadId: MONITOR_THREAD_ID }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Telegram timeout")), 4000))
+    ]);
+  } catch (_) {
+    // Bỏ qua
+  }
+
   process.exit(0);
 });
 
 process.on("uncaughtException", async (err) => {
   const now = new Date().toLocaleString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh" });
-  await sendTelegram(`💥 IPN Server crash\n🕐 ${now}\n❌ ${err.message}`, {
-    threadId: MONITOR_THREAD_ID
-  });
+  const message = `💥 IPN Server crash\n🕐 ${now}\n❌ ${err.message}`;
+
+  try {
+    await Promise.race([
+      sendTelegram(message, { threadId: MONITOR_THREAD_ID }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Telegram timeout")), 4000))
+    ]);
+  } catch (_) {
+    // Bỏ qua lỗi — không để block process.exit
+  }
+
   process.exit(1);
 });
 
