@@ -735,9 +735,10 @@ app.post("/dashboard/ipn-routes", requireDashboardAuth, async (req, res) => {
   if (ipnRoutes.some(r => r.path === routePath))
     return res.status(400).json({ error: `Route '${routePath}' đã tồn tại` });
 
+  // Default telegram thread id is 4206
   const threadId = telegramThreadId !== undefined && telegramThreadId !== ""
-    ? Number(telegramThreadId)
-    : null;
+  ? Number(telegramThreadId)
+  : 4206;
 
   ipnRoutes.push({ path: routePath, telegramThreadId: threadId });
   await saveIpnRoutes();
