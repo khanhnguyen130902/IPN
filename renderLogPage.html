@@ -869,6 +869,108 @@
       opacity: 0.4;
       cursor: not-allowed;
     }
+
+    /* ── AES KEY INPUT ── */
+    .aes-key-wrap {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 1;
+      min-width: 0;
+      max-width: 320px;
+    }
+
+    .aes-key-input {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 5px 10px;
+      border-radius: 5px;
+      border: 1px solid var(--border2);
+      background: var(--bg3);
+      color: var(--text);
+      outline: none;
+      width: 200px;
+      min-width: 0;
+      transition: border-color 0.15s, width 0.2s;
+      caret-color: var(--accent);
+    }
+
+    .aes-key-input::placeholder {
+      color: var(--text3);
+    }
+
+    .aes-key-input:focus {
+      border-color: var(--accent);
+    }
+
+    .aes-key-input.valid {
+      border-color: #34d39960;
+    }
+
+    .aes-key-input.invalid {
+      border-color: #f8717160;
+    }
+
+    .aes-key-status {
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      white-space: nowrap;
+      flex-shrink: 0;
+      color: var(--text3);
+      min-width: 14px;
+    }
+
+    .aes-key-status.ok  { color: var(--green); }
+    .aes-key-status.err { color: var(--red); }
+
+    /* local-decrypt result badge */
+    .local-decrypt-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #22d3ee18;
+      color: var(--cyan);
+      border: 1px solid #22d3ee30;
+      white-space: nowrap;
+    }
+
+    .local-decrypt-hint {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text3);
+      background: #4f8cff08;
+      border-top: 1px solid var(--border);
+    }
+
+    .local-decrypt-err {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--red);
+      background: #f8717108;
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── RESPONSIVE: shrink key input on small screens ── */
+    @media (max-width: 600px) {
+      .aes-key-input {
+        width: 120px;
+        font-size: 10px;
+        padding: 4px 7px;
+      }
+      .aes-key-status { display: none; }
+    }
+
+    @media (max-width: 400px) {
+      .aes-key-input {
+        width: 90px;
+      }
+    }
   </style>
 </head>
 
@@ -884,6 +986,18 @@
     <span class="chip live">● LIVE</span>
     <span class="chip post-chip">POST</span>
     <div class="topbar-right">
+      <div class="aes-key-wrap">
+        <input
+          id="aes-key-input"
+          class="aes-key-input"
+          placeholder="AES Key (hex 64)…"
+          maxlength="64"
+          autocomplete="off"
+          spellcheck="false"
+          inputmode="text"
+        />
+        <span class="aes-key-status" id="aes-key-status"></span>
+      </div>
       <span id="counter-chip">0 requests</span>
       <button class="clear-btn" onclick="clearAll()">Clear</button>
     </div>
@@ -1189,9 +1303,14 @@
         html += infoCell("Sequence", "#" + entry.Sequence, "");
         html += infoCell("Status", "DECRYPT FAILED", "red");
         html += '</div>';
+
+        // Raw data section (luôn hiển thị)
         html += '<div class="section">';
         html += '<div class="section-header"><span class="section-title">Raw Data</span></div>';
         html += '<div class="raw-block">' + esc(entry.rawData || "") + '</div>';
+
+        // Placeholder cho local decrypt result — sẽ được inject sau khi await
+        html += '<div id="local-decrypt-result"></div>';
         html += '</div>';
       } else {
         html += '<div class="info-grid">';
@@ -1233,6 +1352,82 @@
       detailEl.innerHTML = html;
       detailEl.scrollTop = 0;
       window.__selectedEntry = entry;
+
+      // Nếu là decryptFailed → thử local decrypt async
+      if (isFailed) {
+        renderLocalDecryptResult(entry);
+      }
+    }
+
+    async function renderLocalDecryptResult(entry) {
+      const placeholder = document.getElementById("local-decrypt-result");
+      if (!placeholder) return;
+
+      const keyHex = getAesKey();
+      if (!keyHex) {
+        placeholder.innerHTML =
+          '<div class="local-decrypt-hint">💡 Nhập AES Key (hex 64 ký tự) ở thanh trên để thử decrypt trực tiếp trên trình duyệt.</div>';
+        return;
+      }
+      if (!/^[0-9a-fA-F]{64}$/.test(keyHex)) {
+        placeholder.innerHTML =
+          '<div class="local-decrypt-err">⚠️ AES Key không hợp lệ — phải là hex 64 ký tự.</div>';
+        return;
+      }
+
+      // Đang thử decrypt
+      placeholder.innerHTML =
+        '<div class="local-decrypt-hint" style="color:var(--text2)">⏳ Đang thử decrypt…</div>';
+
+      const result = await tryLocalDecrypt(entry.rawData);
+
+      if (result.success) {
+        // Inject thêm section decrypted vào detail-body ngay sau section raw
+        const detailBody = detailEl.querySelector(".detail-body");
+
+        // Xóa hint
+        placeholder.innerHTML = '';
+
+        // Thêm badge vào section-header của Raw Data
+        const rawHeader = detailEl.querySelector(".section-header .section-title");
+        if (rawHeader && !detailEl.querySelector(".local-decrypt-badge")) {
+          const badge = document.createElement("span");
+          badge.className = "local-decrypt-badge";
+          badge.textContent = "🔓 Decrypted locally";
+          rawHeader.parentElement.appendChild(badge);
+        }
+
+        // Tạo section "Decrypted Payload (Local)"
+        const section = document.createElement("div");
+        section.className = "section";
+        section.innerHTML =
+          '<div class="section-header">' +
+          '<span class="section-title">Decrypted Payload</span>' +
+          '<span class="local-decrypt-badge">🔓 Local Key</span>' +
+          '</div>' +
+          '<pre class="json-block">' + highlightJSON(result.data) + '</pre>';
+        detailBody.appendChild(section);
+
+        // Thêm nút Copy JSON
+        const topbar = detailEl.querySelector(".detail-topbar");
+        if (topbar && !topbar.querySelector(".copy-btn")) {
+          const copyBtn = document.createElement("button");
+          copyBtn.className = "copy-btn";
+          copyBtn.textContent = "Copy JSON";
+          copyBtn.onclick = () => {
+            navigator.clipboard.writeText(JSON.stringify(result.data, null, 2))
+              .then(() => { copyBtn.textContent = "Copied!"; setTimeout(() => copyBtn.textContent = "Copy JSON", 1500); });
+          };
+          topbar.appendChild(copyBtn);
+        }
+
+        // Lưu vào entry để copyJSON() có thể dùng
+        window.__selectedEntry = { ...entry, _localDecrypted: result.data };
+
+      } else if (result.reason === "wrong_key" || result.reason === "invalid_json" || result.reason === "bad_data") {
+        placeholder.innerHTML =
+          '<div class="local-decrypt-err">❌ Key không đúng hoặc dữ liệu không hợp lệ.</div>';
+      }
     }
 
     function infoCell(label, value, colorClass) {
@@ -1362,6 +1557,83 @@
           }
         }
       };
+    }
+
+    /* ── AES KEY INPUT ── */
+    const aesKeyInput = document.getElementById("aes-key-input");
+    const aesKeyStatusEl = document.getElementById("aes-key-status");
+
+    // Restore key from sessionStorage (stays in tab, gone when tab closes)
+    aesKeyInput.value = sessionStorage.getItem("ipn_aes_key") || "";
+    updateAesKeyStatus();
+
+    aesKeyInput.addEventListener("input", () => {
+      sessionStorage.setItem("ipn_aes_key", aesKeyInput.value.trim());
+      updateAesKeyStatus();
+      // Re-render detail nếu đang xem entry decryptFailed
+      const entry = window.__selectedEntry;
+      if (entry?.decryptFailed) renderDetail(entry);
+    });
+
+    function getAesKey() {
+      return aesKeyInput.value.trim();
+    }
+
+    function updateAesKeyStatus() {
+      const k = getAesKey();
+      if (!k) {
+        aesKeyInput.classList.remove("valid", "invalid");
+        aesKeyStatusEl.textContent = "";
+        aesKeyStatusEl.className = "aes-key-status";
+        return;
+      }
+      if (/^[0-9a-fA-F]{64}$/.test(k)) {
+        aesKeyInput.classList.add("valid");
+        aesKeyInput.classList.remove("invalid");
+        aesKeyStatusEl.textContent = "✓";
+        aesKeyStatusEl.className = "aes-key-status ok";
+      } else {
+        aesKeyInput.classList.add("invalid");
+        aesKeyInput.classList.remove("valid");
+        aesKeyStatusEl.textContent = "✗";
+        aesKeyStatusEl.className = "aes-key-status err";
+      }
+    }
+
+    /* ── LOCAL DECRYPT (Web Crypto — AES-256-CBC) ── */
+    async function tryLocalDecrypt(rawHex) {
+      const keyHex = getAesKey();
+      if (!keyHex || !/^[0-9a-fA-F]{64}$/.test(keyHex)) {
+        return { success: false, reason: "no_key" };
+      }
+      if (!rawHex || rawHex.length < 32) {
+        return { success: false, reason: "bad_data" };
+      }
+      try {
+        const hexToBytes = h => new Uint8Array(h.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+        const ivBytes   = hexToBytes(rawHex.substring(0, 32));
+        const dataBytes = hexToBytes(rawHex.substring(32));
+        const keyBytes  = hexToBytes(keyHex);
+
+        const cryptoKey = await crypto.subtle.importKey(
+          "raw", keyBytes,
+          { name: "AES-CBC" },
+          false, ["decrypt"]
+        );
+        const decrypted = await crypto.subtle.decrypt(
+          { name: "AES-CBC", iv: ivBytes },
+          cryptoKey,
+          dataBytes
+        );
+        const text = new TextDecoder().decode(decrypted);
+        const json = JSON.parse(text);
+        if (!json || typeof json !== "object" || Array.isArray(json)) {
+          return { success: false, reason: "invalid_json" };
+        }
+        return { success: true, data: json };
+      } catch (_) {
+        return { success: false, reason: "wrong_key" };
+      }
     }
 
     init();

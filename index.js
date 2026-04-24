@@ -514,7 +514,8 @@ function sanitizeLogForDisplay(logEntry) {
 function createIPNHandler({ routeName, telegramThreadId }) {
   return (req, res) => {
     const body = req.body;
-    res.status(200).json({ status: "received" });
+    // res.status(200).json({ status: "received" });
+    res.status(200).json({ code: "00" });
     setImmediate(() => {
       const log = { decrypted: null, status: "pending", merchant: null, attempts: 0, error: null };
       try {
