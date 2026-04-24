@@ -23,6 +23,9 @@ const redis = new Redis({
 const REDIS_KEY = "ipn:logs";
 const REDIS_AES_KEYS = "dashboard:aes_keys";
 const REDIS_IPN_ROUTES = "dashboard:ipn_routes";
+const REDIS_DUPLICATE_COUNTER = "ipn:duplicate_counter"; // Hash: fingerprint -> {count, lastSeen}
+const REDIS_TELEGRAM_DEDUPE = "ipn:telegram_dedupe";     // Hash: key -> timestamp
+const DUPLICATE_TTL_SEC = 24 * 60 * 60;                 // 24h tính bằng giây cho Redis EXPIRE
 
 // =========================
 // SEED DATA (fallback khi Redis trống)
@@ -155,6 +158,9 @@ async function saveIpnRoutes() {
 const MAX_LOGS = 30000;
 const MONITOR_THREAD_ID = 1820;
 
+// Redis write queue — tách khỏi critical path, SSE broadcast không chờ Redis
+const redisWriteQueue = new PQueue({ concurrency: 1 });
+
 // =========================
 // IN-MEMORY STATE
 // =========================
@@ -178,6 +184,42 @@ async function initSequenceFromRedis() {
     }
   } catch (err) {
     console.error("initSequenceFromRedis error:", err.message);
+  }
+}
+
+// Restore duplicateCounter từ Redis sau restart
+async function initDuplicateCounterFromRedis() {
+  try {
+    const now = Date.now();
+    const raw = await redis.hgetall(REDIS_DUPLICATE_COUNTER);
+    if (!raw) return;
+    let loaded = 0;
+    for (const [fingerprint, val] of Object.entries(raw)) {
+      const parsed = typeof val === "string" ? JSON.parse(val) : val;
+      // Bỏ qua nếu đã quá TTL 24h
+      if (now - (parsed.lastSeen || 0) > DUPLICATE_COUNTER_TTL_MS) continue;
+      duplicateCounter.set(fingerprint, parsed);
+      loaded++;
+    }
+    console.log(`[INIT] duplicateCounter restored: ${loaded} entries`);
+  } catch (err) {
+    console.error("initDuplicateCounterFromRedis error:", err.message);
+  }
+}
+
+// Restore telegramDedupe từ Redis sau restart
+async function initTelegramDedupeFromRedis() {
+  try {
+    const raw = await redis.hgetall(REDIS_TELEGRAM_DEDUPE);
+    if (!raw) return;
+    let loaded = 0;
+    for (const [key, val] of Object.entries(raw)) {
+      const ts = Number(val);
+      if (!isNaN(ts)) { telegramDedupe.set(key, ts); loaded++; }
+    }
+    console.log(`[INIT] telegramDedupe restored: ${loaded} entries`);
+  } catch (err) {
+    console.error("initTelegramDedupeFromRedis error:", err.message);
   }
 }
 
@@ -379,20 +421,41 @@ function validateIPNPayload(data) {
 // =========================
 // LOG HELPERS
 // =========================
-async function pushLog(entry) {
+function pushEntry(entry) {
+  entry._ts = Date.now();
+  if (allEntries.length >= MAX_LOGS) allEntries.pop();
+  allEntries.unshift(entry);
+  // Chỉ tăng nếu entry thuộc route đang xem (hoặc đang xem tất cả)
+  if (!routeFilter || entry.route === routeFilter) {
+    totalIpnCount++;
+  }
+  updateTabTitle();
+  updateCounter();
+}
+
+function pushLog(entry) {
+  // 1. Cập nhật in-memory ngay lập tức
   ipnLogs.push(entry);
   if (ipnLogs.length > MAX_LOGS) ipnLogs.shift();
-  try {
-    await redis.pipeline()
-      .lpush(REDIS_KEY, JSON.stringify(entry))
-      .ltrim(REDIS_KEY, 0, MAX_LOGS - 1)
-      .exec();
-  } catch (err) {
-    console.error("Redis pushLog error:", err.message);
-  }
+
+  // 2. Broadcast SSE ngay — không chờ Redis
   const eventData = `data: ${JSON.stringify(entry)}\n\n`;
   sseClients.forEach((res) => res.write(eventData));
+
+  // 3. Telegram ngay (async, không block)
   if (!entry.__skipTelegram) void pushLogToTelegram(entry);
+
+  // 4. Redis write chạy ngầm qua queue — không block SSE
+  redisWriteQueue.add(async () => {
+    try {
+      await redis.pipeline()
+        .lpush(REDIS_KEY, JSON.stringify(entry))
+        .ltrim(REDIS_KEY, 0, MAX_LOGS - 1)
+        .exec();
+    } catch (err) {
+      console.error("Redis pushLog error:", err.message);
+    }
+  });
 }
 
 function getTelegramValidationState(entry) {
@@ -477,11 +540,21 @@ function buildLogEntry({ body, log, validation }) {
   const Sequence = ipnSequence;
   const fingerprint = getFingerprint(log.decrypted || body);
 
-  // TRƯỚC: duplicateCounter.set(fingerprint, duplicateCount)
-  // SAU: lưu thêm lastSeen để cleanup được
   const existing = duplicateCounter.get(fingerprint);
   const duplicateCount = (existing?.count || 0) + 1;
-  duplicateCounter.set(fingerprint, { count: duplicateCount, lastSeen: Date.now() });
+  const lastSeen = Date.now();
+  duplicateCounter.set(fingerprint, { count: duplicateCount, lastSeen });
+
+  // Persist vào Redis ngầm — không block flow chính
+  redisWriteQueue.add(async () => {
+    try {
+      await redis.hset(REDIS_DUPLICATE_COUNTER, { [fingerprint]: JSON.stringify({ count: duplicateCount, lastSeen }) });
+      // Gia hạn TTL mỗi lần có activity
+      await redis.expire(REDIS_DUPLICATE_COUNTER, DUPLICATE_TTL_SEC);
+    } catch (err) {
+      console.error("Redis duplicateCounter persist error:", err.message);
+    }
+  });
 
   const duplicateInfo = duplicateCount === 1 ? "first_time" : `duplicate_x${duplicateCount}`;
   const uid = `${Sequence}_${Date.now()}`;
@@ -616,7 +689,10 @@ app.get("/logs/history", async (req, res) => {
 
 app.delete("/logs/clear", async (req, res) => {
   ipnLogs.length = 0;
-  await redis.del(REDIS_KEY);
+  await Promise.all([
+    redis.del(REDIS_KEY),
+    redis.del("ipn:route_counts"),
+  ]);
   res.json({ ok: true });
 });
 
@@ -629,6 +705,20 @@ app.get("/logs/stream", (req, res) => {
   res.write("retry: 3000\n\n");
   sseClients.add(res);
   req.on("close", () => sseClients.delete(res));
+});
+
+app.get("/logs/count", async (req, res) => {
+  try {
+    const route = req.query.route;
+    if (!route) {
+      const total = await redis.llen(REDIS_KEY);
+      return res.json({ total });
+    }
+    const count = await redis.hget("ipn:route_counts", route);
+    res.json({ total: Number(count) || 0 });
+  } catch (err) {
+    res.json({ total: null });
+  }
 });
 
 // Phải đứng SAU /logs/history, /logs/stream, /logs/clear

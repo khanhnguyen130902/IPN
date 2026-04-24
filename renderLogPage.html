@@ -371,7 +371,7 @@
     .time-text {
       font-family: 'JetBrains Mono', monospace;
       font-size: 10px;
-      color: var(--text3);
+      color: var(--text);
       flex-shrink: 0;
     }
 
@@ -1492,9 +1492,8 @@
     }
 
     function updateCounter() {
-      const n = routeFilter
-        ? allEntries.filter(e => e.route === routeFilter).length
-        : (totalIpnCount > 0 ? totalIpnCount : allEntries.length);
+      // Luôn dùng totalIpnCount (đã set đúng cho cả 2 trường hợp)
+      const n = totalIpnCount > 0 ? totalIpnCount : allEntries.length;
       counterEl.textContent = n.toLocaleString("vi-VN") + " request" + (n !== 1 ? "s" : "");
     }
 
@@ -1551,7 +1550,12 @@
 
     /* ── INIT ── */
     async function init() {
-      const res = await fetch(`/logs/history?start=0&limit=${PAGE_SIZE}`);
+      const fetchHistory = fetch(`/logs/history?start=0&limit=${PAGE_SIZE}`);
+      const fetchRouteCount = routeFilter
+        ? fetch(`/logs/count?route=${encodeURIComponent(routeFilter)}`)  // ← đổi route-count → count
+        : null;
+
+      const res = await fetchHistory;
       const data = await res.json();
       MAX_LOGS = data.maxLogs || 500;
 
@@ -1560,7 +1564,20 @@
 
       currentStart = logs.length;
       hasMore = data.hasMore === true;
-      if (typeof data.total === "number") totalIpnCount = data.total;
+
+      if (routeFilter) {
+        // Lấy total từ endpoint riêng per-route
+        try {
+          const cRes = await fetchRouteCount;
+          const cData = await cRes.json();
+          if (typeof cData.total === "number") totalIpnCount = cData.total;
+        } catch (_) {
+          // fallback: đếm trong allEntries nếu API lỗi
+          totalIpnCount = allEntries.filter(e => e.route === routeFilter).length;
+        }
+      } else {
+        if (typeof data.total === "number") totalIpnCount = data.total;
+      }
 
       updateCounter();
       rebuildList();
@@ -1578,7 +1595,6 @@
       source.onmessage = (event) => {
         const entry = JSON.parse(event.data);
         pushEntry(entry);
-        // Prepend single item instead of rebuilding entire list
         prependItem(entry);
 
         const el = listEl.querySelector('[data-seq="' + entry.uid + '"]');
