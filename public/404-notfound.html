@@ -3,7 +3,8 @@
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no">
     <title>404 — Không Tìm Thấy Trang</title>
     <link
         href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Space+Mono:wght@400;700&display=swap"
@@ -753,6 +754,28 @@
     </div>
 
     <script>
+        // Chặn toàn bộ thao tác zoom trên mobile (pinch/double-tap/gesture)
+        (function disableMobileZoom() {
+            let lastTouchEnd = 0;
+            document.addEventListener("touchstart", (event) => {
+                if (event.touches.length > 1) event.preventDefault();
+            }, { passive: false });
+            document.addEventListener("touchmove", (event) => {
+                if (event.touches.length > 1) event.preventDefault();
+            }, { passive: false });
+            document.addEventListener("touchend", (event) => {
+                const now = Date.now();
+                if (now - lastTouchEnd <= 300) event.preventDefault();
+                lastTouchEnd = now;
+            }, { passive: false });
+            document.addEventListener("gesturestart", (event) => event.preventDefault(), { passive: false });
+            document.addEventListener("gesturechange", (event) => event.preventDefault(), { passive: false });
+            document.addEventListener("gestureend", (event) => event.preventDefault(), { passive: false });
+            window.addEventListener("wheel", (event) => {
+                if (event.ctrlKey) event.preventDefault();
+            }, { passive: false });
+        })();
+
         // ── Chỉ chặn bôi đen / select text ──
         document.addEventListener('selectstart', e => e.preventDefault());
         document.addEventListener('dragstart', e => e.preventDefault());
