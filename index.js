@@ -508,7 +508,7 @@ function formatTelegramMessage(entry) {
   const prefix = `${statusIcon} [IPN-LOG]${invalidTag}`;
   const merchantLine = `🐳 Merchant: ${entry?.merchant || "-"}`;
   const isMasterMerchantCard = entry?.validation?.profile === "master-merchant-card";
-  const posLine = isMasterMerchantCard ? `\n🤖 POS: ${entry?.decrypted?.serialNo || "-"}` : "";
+  const posLine = isMasterMerchantCard ? `\n🤖 EDC: ${entry?.decrypted?.serialNo || "-"}` : "";
   const validation = entry?.validation;
   let validationLine = "";
   if (validation?.applied) {

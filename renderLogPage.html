@@ -1126,6 +1126,7 @@
     let mobileView = "list";
     let newCount = 0;
     let totalIpnCount = 0;
+    let totalIpnCountLoaded = false; // flag: đã nhận được giá trị thực từ server chưa
 
     // ── PAGINATION STATE ──
     const PAGE_SIZE = 100;
@@ -1309,7 +1310,10 @@
       const old = listEl.querySelector(".load-more-wrap");
       if (old) old.remove();
 
+      // Ẩn nút nếu không còn gì để tải
+      // hoặc tổng IPN <= số item đang hiển thị (không cần phân trang)
       if (!hasMore) return;
+      if (totalIpnCountLoaded && totalIpnCount <= allEntries.length) return;
 
       const wrap = document.createElement("div");
       wrap.className = "load-more-wrap";
@@ -1469,55 +1473,21 @@
         return;
       }
 
-      // Đang thử decrypt
       placeholder.innerHTML =
         '<div class="local-decrypt-hint" style="color:var(--text2)">⏳ Đang thử decrypt…</div>';
 
       const result = await tryLocalDecrypt(entry.rawData);
 
       if (result.success) {
-        // Inject thêm section decrypted vào detail-body ngay sau section raw
-        const detailBody = detailEl.querySelector(".detail-body");
-
-        // Xóa hint
-        placeholder.innerHTML = '';
-
-        // Thêm badge vào section-header của Raw Data
-        const rawHeader = detailEl.querySelector(".section-header .section-title");
-        if (rawHeader && !detailEl.querySelector(".local-decrypt-badge")) {
-          const badge = document.createElement("span");
-          badge.className = "local-decrypt-badge";
-          badge.textContent = "🔓 Decrypted locally";
-          rawHeader.parentElement.appendChild(badge);
-        }
-
-        // Tạo section "Decrypted Payload (Local)"
-        const section = document.createElement("div");
-        section.className = "section";
-        section.innerHTML =
-          '<div class="section-header">' +
-          '<span class="section-title">Decrypted Payload</span>' +
-          '<span class="local-decrypt-badge">🔓 Local Key</span>' +
-          '</div>' +
-          '<pre class="json-block">' + highlightJSON(result.data) + '</pre>';
-        detailBody.appendChild(section);
-
-        // Thêm nút Copy JSON
-        const topbar = detailEl.querySelector(".detail-topbar");
-        if (topbar && !topbar.querySelector(".copy-btn")) {
-          const copyBtn = document.createElement("button");
-          copyBtn.className = "copy-btn";
-          copyBtn.textContent = "Copy JSON";
-          copyBtn.onclick = () => {
-            navigator.clipboard.writeText(JSON.stringify(result.data, null, 2))
-              .then(() => { copyBtn.textContent = "Copied!"; setTimeout(() => copyBtn.textContent = "Copy JSON", 1500); });
-          };
-          topbar.appendChild(copyBtn);
-        }
-
-        // Lưu vào entry để copyJSON() có thể dùng
-        window.__selectedEntry = { ...entry, _localDecrypted: result.data };
-
+        // Patch entry với data đã decrypt rồi re-render toàn bộ như entry bình thường
+        const patchedEntry = {
+          ...entry,
+          decryptFailed: false,
+          decrypted: result.data,
+          _localDecrypted: true,
+        };
+        window.__selectedEntry = patchedEntry;
+        renderDetail(patchedEntry);
       } else if (result.reason === "wrong_key" || result.reason === "invalid_json" || result.reason === "bad_data") {
         placeholder.innerHTML =
           '<div class="local-decrypt-err">❌ Key không đúng hoặc dữ liệu không hợp lệ.</div>';
@@ -1545,14 +1515,18 @@
       entry._ts = Date.now();
       if (allEntries.length >= MAX_LOGS) allEntries.pop();
       allEntries.unshift(entry);
-      totalIpnCount++; // update totalIpnCount
+      // Chỉ tăng counter nếu entry thuộc route đang xem
+      if (!routeFilter || entry.route === routeFilter) {
+        totalIpnCount++;
+      }
       updateTabTitle();
       updateCounter();
     }
 
     function updateCounter() {
-      // Luôn dùng totalIpnCount (đã set đúng cho cả 2 trường hợp)
-      const n = totalIpnCount > 0 ? totalIpnCount : allEntries.length;
+      // Dùng totalIpnCount nếu đã load từ server (kể cả khi = 0)
+      // fallback sang allEntries.length chỉ khi chưa có dữ liệu từ server
+      const n = totalIpnCountLoaded ? totalIpnCount : allEntries.length;
       counterEl.textContent = n.toLocaleString("vi-VN") + " request" + (n !== 1 ? "s" : "");
     }
 
@@ -1576,11 +1550,17 @@
       if (btn) { btn.disabled = true; btn.textContent = "Đang tải..."; }
 
       try {
-        const res = await fetch(`/logs/history?start=${currentStart}&limit=${PAGE_SIZE}`);
+        const routeParam = routeFilter ? `&route=${encodeURIComponent(routeFilter)}` : "";
+        const res = await fetch(`/logs/history?start=${currentStart}&limit=${PAGE_SIZE}${routeParam}`);
         const data = await res.json();
         const newLogs = data.logs || [];
 
-        newLogs.forEach(e => {
+        // Filter theo route nếu cần (phòng trường hợp backend không filter)
+        const filtered = routeFilter
+          ? newLogs.filter(e => e.route === routeFilter)
+          : newLogs;
+
+        filtered.forEach(e => {
           e._ts = e.receivedAt || null;
           // Tránh duplicate nếu có entry mới đến qua SSE trùng uid
           if (!allEntries.find(x => x.uid === e.uid)) {
@@ -1588,9 +1568,10 @@
           }
         });
 
-        currentStart += newLogs.length;
+        currentStart += newLogs.length; // tăng theo raw để pagination Redis đúng
         hasMore = data.hasMore === true;
 
+        // Không cộng vào totalIpnCount vì đã lấy đúng từ server lúc init
         updateCounter();
         rebuildList();
 
@@ -1629,13 +1610,14 @@
         try {
           const cRes = await fetchRouteCount;
           const cData = await cRes.json();
-          if (typeof cData.total === "number") totalIpnCount = cData.total;
+          if (typeof cData.total === "number") { totalIpnCount = cData.total; totalIpnCountLoaded = true; }
         } catch (_) {
           // fallback: đếm trong allEntries nếu API lỗi
           totalIpnCount = allEntries.filter(e => e.route === routeFilter).length;
+          totalIpnCountLoaded = true;
         }
       } else {
-        if (typeof data.total === "number") totalIpnCount = data.total;
+        if (typeof data.total === "number") { totalIpnCount = data.total; totalIpnCountLoaded = true; }
       }
 
       updateCounter();
@@ -1684,9 +1666,13 @@
     aesKeyInput.addEventListener("input", () => {
       sessionStorage.setItem("ipn_aes_key", aesKeyInput.value.trim());
       updateAesKeyStatus();
-      // Re-render detail nếu đang xem entry decryptFailed
+      // Re-render khi nhập key — cả entry thật decryptFailed lẫn entry đã patch local
       const entry = window.__selectedEntry;
-      if (entry?.decryptFailed) renderDetail(entry);
+      if (entry?.decryptFailed || entry?._localDecrypted) renderDetail(
+        entry._localDecrypted
+          ? { ...entry, decryptFailed: true, decrypted: undefined } // reset về failed để re-decrypt với key mới
+          : entry
+      );
     });
 
     function getAesKey() {
